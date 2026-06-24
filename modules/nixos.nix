@@ -18,7 +18,7 @@ let
 
   };
 
-  promptInit = ''
+  shellInit = ''
     # Shorthand for `nix shell nixpkgs#$1 nixpkgs#$2 ...`.
     ns() {
       ORIGINAL_NAME="$name"
@@ -100,7 +100,7 @@ in
   };
 
   programs.direnv = {
-    enable = true;
+    enable = false;
     package = pkgs.direnv;
     silent = true;
     nix-direnv = {
@@ -110,8 +110,5 @@ in
   };
 
   # Bash aliases.
-  programs.bash = {
-    promptInit = promptInit;
-    shellAliases = shellAliases;
-  };
+  programs.bash = { inherit shellInit shellAliases; };
 }

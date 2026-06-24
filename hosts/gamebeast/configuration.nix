@@ -32,7 +32,7 @@ in
     # To find out the 'efiDeviceHandle' value for 'windows', boot into this and
     # run 'map -c'. Run 'ls <device>:\EFI' per handle to look for the
     # 'Microsoft' directory. Use this handle for Windows.
-    # edk2-uefi-shell.enable = true;
+    edk2-uefi-shell.enable = true;
     systemd-boot = {
       enable = true;
       windows = {

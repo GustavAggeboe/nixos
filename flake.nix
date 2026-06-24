@@ -55,6 +55,13 @@
     ) { } inputs.nixpkgs.lib.systems.flakeExposed
     // {
       nixosConfigurations = {
+        aggepc = mkSystem {
+          modules = [
+            ./hosts/aggepc/configuration.nix
+            ./modules/linker.nix
+          ];
+        };
+        
         gamebeast = mkSystem {
           modules = [
             ./hosts/gamebeast/configuration.nix
