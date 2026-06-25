@@ -28,6 +28,23 @@ let
       -disposition:a:2 0 \
       "$tmp" && mv -f "$tmp" "$file"
   '';
+
+  # nixpkgs' `rustdesk` (sciter) wrapper builds its GStreamer plugin path from
+  # buildInputs and omits `pipewire` — so Wayland screen capture fails with
+  # "Failed to create element from factory name" (missing `pipewiresrc`).
+  # (`rustdesk-flutter` includes it, the legacy package doesn't.) Wrap the
+  # already-built binary to add pipewire's gstreamer-1.0 dir to the plugin
+  # path; the .desktop launcher uses `Exec=rustdesk` (PATH), so this also
+  # applies when launched from the GNOME app grid.
+  rustdesk-wayland = pkgs.symlinkJoin {
+    name = "rustdesk-wayland-${pkgs.rustdesk.version}";
+    paths = [ pkgs.rustdesk ];
+    nativeBuildInputs = [ pkgs.makeWrapper ];
+    postBuild = ''
+      wrapProgram $out/bin/rustdesk \
+        --prefix GST_PLUGIN_SYSTEM_PATH_1_0 ':' "${pkgs.pipewire}/lib/gstreamer-1.0"
+    '';
+  };
 in
 {
   imports =
@@ -85,20 +102,41 @@ in
   services.displayManager.gdm.enable = true;
   services.desktopManager.gnome.enable = true;
 
+  # Show minimize and maximize buttons on window titlebars (GNOME only shows
+  # close by default).
+  programs.dconf.profiles.user.databases = [
+    {
+      settings."org/gnome/desktop/wm/preferences" = {
+        button-layout = "appmenu:minimize,maximize,close";
+      };
+    }
+  ];
+
   environment.systemPackages = with pkgs; [
     helix
     vim
     git
     alsa-scarlett-gui
     discord
+    rustdesk-wayland  # Remote desktop client (pipewire gst plugin added for Wayland)
+    gnome-extension-manager  # "Extension Manager" — browse/install/toggle GNOME extensions
 
     # Screen recording / "instant replay" (AMD ReLive-style last-N-minutes
     # capture) using the GPU's hardware encoder (VAAPI). On GNOME Wayland,
     # capture goes through the screencast portal: `gpu-screen-recorder -w portal`.
-    gpu-screen-recorder      # CLI recorder with replay-buffer mode
+    # The `gpu-screen-recorder` package itself is installed via
+    # `programs.gpu-screen-recorder.enable` below (which also sets up the
+    # setcap wrapper for promptless recording).
     gpu-screen-recorder-gtk  # optional GTK GUI / tray frontend
     libva-utils              # `vainfo` — verify hardware encode works
   ];
+
+  # Install gpu-screen-recorder via its NixOS module rather than just dropping
+  # the package in systemPackages: the module additionally creates a setcap
+  # wrapper for `gsr-kms-server` (cap_sys_admin) enabling promptless, direct
+  # KMS capture. The rolling replay buffer still needs the systemd user
+  # service below — there is no upstream option for an always-on replay buffer.
+  programs.gpu-screen-recorder.enable = true;
 
   # "Instant replay" as a background user service: keeps a rolling 5-minute
   # buffer running for the whole graphical session. On GNOME Wayland the portal
