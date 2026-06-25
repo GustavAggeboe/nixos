@@ -65,7 +65,7 @@ in
         "Windows" = {
           title = "Windows 11";
           sortKey = "0";
-          efiDeviceHandle = "HD2b";
+          efiDeviceHandle = "HD1b";
         };
       };
     };
@@ -117,8 +117,11 @@ in
     vim
     git
     alsa-scarlett-gui
+    easyeffects  # Audio effects (input noise suppression via RNNoise; tune in GUI)
     discord
     rustdesk-wayland  # Remote desktop client (pipewire gst plugin added for Wayland)
+    jetbrains.idea  # IntelliJ IDEA Ultimate (swap to .idea-community for the free edition)
+    nodejs  # provides node, npm and npx
     gnome-extension-manager  # "Extension Manager" — browse/install/toggle GNOME extensions
 
     # Screen recording / "instant replay" (AMD ReLive-style last-N-minutes
@@ -133,6 +136,12 @@ in
     # setcap wrapper for promptless recording).
     gpu-screen-recorder-gtk  # optional GTK GUI / tray frontend
     libva-utils              # `vainfo` — verify hardware encode works
+
+    # GUI archive extraction. file-roller is GNOME's "Archive Manager"
+    # (right-click → Extract in Files/Nautilus); p7zip is the CLI backend it
+    # calls to handle .7z (and other) archives.
+    file-roller
+    p7zip
   ];
 
   # Install gpu-screen-recorder via its NixOS module rather than just dropping
