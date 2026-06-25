@@ -122,8 +122,12 @@ in
     gnome-extension-manager  # "Extension Manager" — browse/install/toggle GNOME extensions
 
     # Screen recording / "instant replay" (AMD ReLive-style last-N-minutes
-    # capture) using the GPU's hardware encoder (VAAPI). On GNOME Wayland,
-    # capture goes through the screencast portal: `gpu-screen-recorder -w portal`.
+    # capture) using the GPU's hardware encoder (VAAPI). We capture the monitor
+    # directly via KMS (`gpu-screen-recorder -w DP-2`) rather than through the
+    # GNOME screencast portal (`-w portal`): on this GNOME 50 / Mutter Wayland +
+    # AMD (Mesa 26.x) stack the portal feeds GSR all-black frames (audio fine,
+    # video pure black) even though it reports a healthy capture framerate.
+    # Direct KMS capture sidesteps the portal entirely and records real frames.
     # The `gpu-screen-recorder` package itself is installed via
     # `programs.gpu-screen-recorder.enable` below (which also sets up the
     # setcap wrapper for promptless recording).
@@ -136,15 +140,26 @@ in
   # wrapper for `gsr-kms-server` (cap_sys_admin) enabling promptless, direct
   # KMS capture. The rolling replay buffer still needs the systemd user
   # service below — there is no upstream option for an always-on replay buffer.
+  #
+  # `-restart-replay-on-save yes` clears the rolling buffer on every save, so
+  # back-to-back saves don't overlap: if you save, then save again a minute
+  # later, the second clip is only ~1 minute long (just the new footage) rather
+  # than another full 5 minutes that re-includes the first clip.
   programs.gpu-screen-recorder.enable = true;
 
   # "Instant replay" as a background user service: keeps a rolling 5-minute
-  # buffer running for the whole graphical session. On GNOME Wayland the portal
-  # asks for screen-share permission the first time the service starts;
-  # `-restore-portal-session yes` saves a restore token (under
-  # ~/.config/gpu-screen-recorder) so every later login starts silently.
-  # Save the last 5 minutes any time with:
-  #   systemctl --user kill -s SIGUSR1 gsr-replay.service
+  # buffer running for the whole graphical session. KMS capture needs no portal
+  # permission prompt (the gsr-kms-server setcap wrapper grants the access), so
+  # the service starts silently on every login. `-w DP-2` captures the primary
+  # monitor; the secondary is `DP-1` (see `gpu-screen-recorder --list-monitors`).
+  # Save the last 5 minutes any time with (Alt+F10 is bound to this via a GNOME
+  # custom keybinding in dconf):
+  #   systemctl --user kill --kill-whom=main -s SIGUSR1 gsr-replay.service
+  # NOTE: --kill-whom=main is required. Without it, systemd signals every
+  # process in the unit's cgroup, so SIGUSR1 also hits the gsr-kms-server helper
+  # child and breaks KMS capture ("failed to get kms ... no drm found"), after
+  # which all saves silently produce nothing. The flag targets only the main
+  # gpu-screen-recorder process, which is what interprets SIGUSR1 as "save".
   systemd.user.services.gsr-replay = {
     description = "GPU Screen Recorder — rolling 5-minute replay buffer";
     wantedBy = [ "graphical-session.target" ];
@@ -152,7 +167,7 @@ in
     after = [ "graphical-session.target" ];
     serviceConfig = {
       ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/Videos";
-      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w portal -restore-portal-session yes -c mkv -k hevc -f 60 -r 300 -a \"default_output|default_input\" -a default_output -a default_input -sc ${gsrSaveScript} -o %h/Videos/";
+      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-2 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|default_input\" -a default_output -a default_input -sc ${gsrSaveScript} -o %h/Videos/";
       # Retry if the portal/PipeWire isn't ready yet at login.
       Restart = "on-failure";
       RestartSec = 5;
