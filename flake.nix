@@ -6,6 +6,10 @@
       url = "github:swagtop/hytale-flake";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Windows-style mouse acceleration kernel module (see modules/mouse.nix).
+    # Its flake exposes only nixosModules.default and declares no `nixpkgs`
+    # input to follow; the kernel module is built against this system's kernel.
+    maccel.url = "github:Gnarus-G/maccel";
   };
 
   outputs =
@@ -59,6 +63,7 @@
           modules = [
             ./hosts/aggepc/configuration.nix
             ./modules/linker.nix
+            ./modules/mouse.nix
           ];
         };
         

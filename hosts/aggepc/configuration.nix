@@ -126,7 +126,7 @@ in
 
     # Screen recording / "instant replay" (AMD ReLive-style last-N-minutes
     # capture) using the GPU's hardware encoder (VAAPI). We capture the monitor
-    # directly via KMS (`gpu-screen-recorder -w DP-2`) rather than through the
+    # directly via KMS (`gpu-screen-recorder -w DP-1`) rather than through the
     # GNOME screencast portal (`-w portal`): on this GNOME 50 / Mutter Wayland +
     # AMD (Mesa 26.x) stack the portal feeds GSR all-black frames (audio fine,
     # video pure black) even though it reports a healthy capture framerate.
@@ -159,8 +159,8 @@ in
   # "Instant replay" as a background user service: keeps a rolling 5-minute
   # buffer running for the whole graphical session. KMS capture needs no portal
   # permission prompt (the gsr-kms-server setcap wrapper grants the access), so
-  # the service starts silently on every login. `-w DP-2` captures the primary
-  # monitor; the secondary is `DP-1` (see `gpu-screen-recorder --list-monitors`).
+  # the service starts silently on every login. `-w DP-1` captures the monitor
+  # we want; the other one is `DP-2` (see `gpu-screen-recorder --list-monitors`).
   # Save the last 5 minutes any time with (Alt+F10 is bound to this via a GNOME
   # custom keybinding in dconf):
   #   systemctl --user kill --kill-whom=main -s SIGUSR1 gsr-replay.service
@@ -176,7 +176,7 @@ in
     after = [ "graphical-session.target" ];
     serviceConfig = {
       ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/Videos";
-      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-2 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|default_input\" -a default_output -a default_input -sc ${gsrSaveScript} -o %h/Videos/";
+      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-1 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|default_input\" -a default_output -a default_input -sc ${gsrSaveScript} -o %h/Videos/";
       # Retry if the portal/PipeWire isn't ready yet at login.
       Restart = "on-failure";
       RestartSec = 5;

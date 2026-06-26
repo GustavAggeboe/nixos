@@ -20,6 +20,21 @@
         "type": "github"
       }
     },
+    "maccel": {
+      "locked": {
+        "lastModified": 1771614512,
+        "narHash": "sha256-KzvNWDGVpoNcR9wcIOlwxr6Nwtgt9Hicck/0fswhi7U=",
+        "owner": "Gnarus-G",
+        "repo": "maccel",
+        "rev": "c7c1369d4bd4f240b38365cd43bd696d06635e4d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Gnarus-G",
+        "repo": "maccel",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1781577229,
@@ -38,6 +53,7 @@
     "root": {
       "inputs": {
         "hytale-flake": "hytale-flake",
+        "maccel": "maccel",
         "nixpkgs": "nixpkgs"
       }
     }
