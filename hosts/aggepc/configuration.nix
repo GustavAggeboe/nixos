@@ -222,11 +222,17 @@ in
     description = "Easy Effects — audio effects daemon (background service)";
     wantedBy = [ "graphical-session.target" ];
     partOf = [ "graphical-session.target" ];
-    after = [ "graphical-session.target" "pipewire.service" ];
+    # Order after BOTH pipewire and wireplumber: pipewire provides the sink, but
+    # wireplumber is what actually builds the node graph. If EasyEffects starts
+    # while the graph is still settling it can fail to link its sink monitor into
+    # the first output plugin (easyeffects_sink:monitor -> ee_soe_*), leaving the
+    # output chain headless and producing silence even though every node exists.
+    after = [ "graphical-session.target" "pipewire.service" "wireplumber.service" ];
+    wants = [ "pipewire.service" "wireplumber.service" ];
     serviceConfig = {
       ExecStart = "${pkgs.easyeffects}/bin/easyeffects --gapplication-service";
       ExecStop = "${pkgs.easyeffects}/bin/easyeffects --quit";
-      # PipeWire may not be ready yet at login; retry until it is.
+      # PipeWire/WirePlumber may not be ready yet at login; retry until they are.
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -350,7 +356,18 @@ in
             "playback.props" = {
               "node.name" = "game_stereo.output";
               "audio.position" = [ "FL" "FR" ];
-              "node.target" = "alsa_output.usb-Focusrite_Clarett__8Pre_00011584-00.multichannel-output";
+              # Hard-pin this loopback output to the Clarett and mark it as
+              # explicitly routed so the session manager never moves it to
+              # whatever the current default sink is. Without this, Easy Effects
+              # makes "easyeffects_sink" the default sink on start, the loopback
+              # output follows the default and gets relinked onto easyeffects_sink,
+              # and the signal loops easyeffects_sink -> game_stereo ->
+              # easyeffects_sink forever, never reaching the Clarett -> all output
+              # goes silent. `node.dont-reconnect` is what makes the pin sticky
+              # (the deprecated `node.target` only set the *initial* target and
+              # still let the node follow the default afterward).
+              "target.object" = "alsa_output.usb-Focusrite_Clarett__8Pre_00011584-00.multichannel-output";
+              "node.dont-reconnect" = true;
               "stream.dont-remix" = true;
               "node.passive" = true;
             };
