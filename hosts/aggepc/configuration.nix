@@ -29,6 +29,24 @@ let
       "$tmp" && mv -f "$tmp" "$file"
   '';
 
+  # The replay buffer records the mic from Easy Effects' virtual source
+  # ("easyeffects_source") so the captured mic is noise-suppressed/processed
+  # rather than raw. That node only exists once the easyeffects user service
+  # has started and registered it with PipeWire. At login the replay service
+  # can otherwise win the race and start before the node exists, silently
+  # dropping the mic track — so poll (up to ~30s) until it appears first.
+  gsrWaitForMic = pkgs.writeShellScript "gsr-wait-for-easyeffects-source" ''
+    for _ in $(seq 1 60); do
+      if ${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder --list-audio-devices \
+           | ${pkgs.gnugrep}/bin/grep -q '^easyeffects_source|'; then
+        exit 0
+      fi
+      sleep 0.5
+    done
+    echo "gsr-replay: easyeffects_source not found after timeout; starting anyway" >&2
+    exit 0
+  '';
+
   # nixpkgs' `rustdesk` (sciter) wrapper builds its GStreamer plugin path from
   # buildInputs and omits `pipewire` — so Wayland screen capture fails with
   # "Failed to create element from factory name" (missing `pipewiresrc`).
@@ -173,11 +191,42 @@ in
     description = "GPU Screen Recorder — rolling 5-minute replay buffer";
     wantedBy = [ "graphical-session.target" ];
     partOf = [ "graphical-session.target" ];
-    after = [ "graphical-session.target" ];
+    # Start after easyeffects so its "easyeffects_source" mic node exists; the
+    # gsrWaitForMic ExecStartPre below additionally waits for the node to be
+    # registered (the service is "started" the moment the process forks, before
+    # the PipeWire node is up).
+    after = [ "graphical-session.target" "easyeffects.service" ];
+    wants = [ "easyeffects.service" ];
     serviceConfig = {
-      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p %h/Videos";
-      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-1 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|default_input\" -a default_output -a default_input -sc ${gsrSaveScript} -o %h/Videos/";
+      ExecStartPre = [
+        "${pkgs.coreutils}/bin/mkdir -p %h/Videos"
+        "${gsrWaitForMic}"
+      ];
+      # The mic tracks use "easyeffects_source" (Easy Effects' processed virtual
+      # source) instead of "default_input", so recordings get the noise-
+      # suppressed mic. Track layout: Mixed (desktop+mic), Desktop, Microphone.
+      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-1 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|easyeffects_source\" -a default_output -a easyeffects_source -sc ${gsrSaveScript} -o %h/Videos/";
       # Retry if the portal/PipeWire isn't ready yet at login.
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+
+  # Autostart Easy Effects in the background on login so its effects (input
+  # noise suppression via RNNoise, etc.) are applied without opening the GUI.
+  # The `easyeffects` package ships neither a systemd user unit nor an XDG
+  # autostart entry, so nothing launched it before — installing the package
+  # alone only put it in the app menu. `--gapplication-service` runs it
+  # headless (no window), loading the last-used preset/state from the GUI.
+  systemd.user.services.easyeffects = {
+    description = "Easy Effects — audio effects daemon (background service)";
+    wantedBy = [ "graphical-session.target" ];
+    partOf = [ "graphical-session.target" ];
+    after = [ "graphical-session.target" "pipewire.service" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.easyeffects}/bin/easyeffects --gapplication-service";
+      ExecStop = "${pkgs.easyeffects}/bin/easyeffects --quit";
+      # PipeWire may not be ready yet at login; retry until it is.
       Restart = "on-failure";
       RestartSec = 5;
     };
