@@ -30,7 +30,7 @@ let
   '';
 
   # The replay buffer records the mic from the "gsr_mic_boost" virtual source
-  # (a +50% gain filter-chain fed by Easy Effects' processed "easyeffects_source"
+  # (a gain-boosted filter-chain fed by Easy Effects' processed "easyeffects_source"
   # — see the 99-gsr-mic-boost pipewire config). The boost node is created by
   # pipewire and only links once easyeffects_source exists, so it only carries
   # real audio after the easyeffects user service has registered that upstream.
@@ -405,11 +405,12 @@ in
     pulse.enable = true;
 
     # Recording-only mic boost. The screen recorder (gsr-replay) should capture
-    # the mic ~50% louder than everyone else hears it, WITHOUT changing the level
+    # the mic louder than everyone else hears it, WITHOUT changing the level
     # other apps (Discord/Firefox) get from "easyeffects_source". So tap the
     # processed Easy Effects source through a filter-chain that applies a fixed
-    # +50% amplitude gain (linear Mult = 1.5, ~+3.5 dB) and expose the result as
-    # a separate virtual source "gsr_mic_boost" that ONLY gsr-replay records.
+    # linear amplitude gain (the `Mult` control below — 1.0 = unity, higher =
+    # louder) and expose the result as a separate virtual source "gsr_mic_boost"
+    # that ONLY gsr-replay records.
     # node.passive on the capture side keeps the filter idle until gsr actually
     # opens it, so it costs nothing when not recording.
     extraConfig.pipewire."99-gsr-mic-boost" = {
@@ -417,12 +418,12 @@ in
         {
           name = "libpipewire-module-filter-chain";
           args = {
-            "node.description" = "GSR Mic Boost (+50%)";
+            "node.description" = "GSR Mic Boost";
             "media.name" = "GSR Mic Boost";
             "filter.graph" = {
               nodes = [
-                { type = "builtin"; name = "gain_FL"; label = "linear"; control = { "Mult" = 1.5; "Add" = 0.0; }; }
-                { type = "builtin"; name = "gain_FR"; label = "linear"; control = { "Mult" = 1.5; "Add" = 0.0; }; }
+                { type = "builtin"; name = "gain_FL"; label = "linear"; control = { "Mult" = 2.0; "Add" = 0.0; }; }
+                { type = "builtin"; name = "gain_FR"; label = "linear"; control = { "Mult" = 2.0; "Add" = 0.0; }; }
               ];
               inputs = [ "gain_FL:In" "gain_FR:In" ];
               outputs = [ "gain_FL:Out" "gain_FR:Out" ];
@@ -440,7 +441,7 @@ in
             };
             "playback.props" = {
               "node.name" = "gsr_mic_boost";
-              "node.description" = "GSR Mic Boost (+50%)";
+              "node.description" = "GSR Mic Boost";
               "media.class" = "Audio/Source";
               "audio.position" = [ "FL" "FR" ];
               # Keep it out of normal app/default selection — only gsr records it.
