@@ -37,6 +37,13 @@ let
   # At login the replay service can otherwise win the race and start before the
   # node is enumerable, silently dropping the mic track — so poll (up to ~30s)
   # until gsr can see the boost source first.
+  #
+  # On timeout we exit NON-ZERO so the unit's `Restart=on-failure` retries the
+  # whole service rather than launching gpu-screen-recorder against a missing
+  # `gsr_mic_boost` (which makes gsr exit immediately and crash-loop, leaving no
+  # replay buffer for Alt+F10 to save). This recovers automatically if pipewire
+  # is slow to load the 99-gsr-mic-boost filter-chain (e.g. it was started with
+  # stale config and the node only appears after a later pipewire restart).
   gsrWaitForMic = pkgs.writeShellScript "gsr-wait-for-mic-boost" ''
     for _ in $(seq 1 60); do
       if ${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder --list-audio-devices \
@@ -45,8 +52,39 @@ let
       fi
       sleep 0.5
     done
-    echo "gsr-replay: gsr_mic_boost not found after timeout; starting anyway" >&2
-    exit 0
+    echo "gsr-replay: gsr_mic_boost not found after timeout; failing so the unit retries" >&2
+    exit 1
+  '';
+
+  # Heals an early-boot PipeWire race. At login the PipeWire daemon starts very
+  # early (before the session is fully settled) and silently fails to load the
+  # 99-gsr-mic-boost filter-chain module — the daemon keeps running fine but
+  # `gsr_mic_boost` never appears, so every fresh boot loses the boosted mic and
+  # gsr-replay has nothing to record/save. The failure isn't logged (the main
+  # pipewire daemon is silent at the default log level), but it's perfectly
+  # reproducible: restarting the audio stack *after* the session is up always
+  # loads the module. So once everything is up, check for the node and, only if
+  # it's missing, restart pipewire/wireplumber to force the module to (re)load.
+  # This runs at login before any audio is in use, so the brief restart is
+  # harmless; on boots where the daemon did load the filter-chain it's a no-op.
+  gsrMicBoostHeal = pkgs.writeShellScript "gsr-mic-boost-heal" ''
+    has_node() {
+      ${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder --list-audio-devices \
+        | ${pkgs.gnugrep}/bin/grep -q '^gsr_mic_boost|'
+    }
+    # Give the boot pipewire a brief chance to have loaded it already.
+    for _ in $(seq 1 20); do
+      has_node && exit 0
+      sleep 0.5
+    done
+    echo "gsr-mic-boost: node missing; restarting pipewire/wireplumber to load the filter-chain" >&2
+    ${pkgs.systemd}/bin/systemctl --user restart pipewire.service wireplumber.service
+    for _ in $(seq 1 40); do
+      has_node && exit 0
+      sleep 0.5
+    done
+    echo "gsr-mic-boost: node still missing after pipewire restart" >&2
+    exit 1
   '';
 
   # nixpkgs' `rustdesk` (sciter) wrapper builds its GStreamer plugin path from
@@ -126,8 +164,28 @@ in
   # close by default).
   programs.dconf.profiles.user.databases = [
     {
-      settings."org/gnome/desktop/wm/preferences" = {
-        button-layout = "appmenu:minimize,maximize,close";
+      settings = {
+        "org/gnome/desktop/wm/preferences" = {
+          button-layout = "appmenu:minimize,maximize,close";
+        };
+
+        # Alt+F10 → save the gsr-replay rolling buffer (last 5 minutes). The
+        # command sends SIGUSR1 to the gpu-screen-recorder main process; see the
+        # gsr-replay.service below for why --kill-whom=main is required. Declared
+        # here (rather than only in the user's writable dconf) so the binding is
+        # reproduced on a fresh install. The list is a profile default; the
+        # user's writable dconf still wins, so any extra custom bindings added in
+        # GNOME Settings (e.g. discord-mute) are preserved.
+        "org/gnome/settings-daemon/plugins/media-keys" = {
+          custom-keybindings = [
+            "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/gsr-save/"
+          ];
+        };
+        "org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/gsr-save" = {
+          name = "Save replay (last 5 min)";
+          command = "systemctl --user kill --kill-whom=main -s SIGUSR1 gsr-replay.service";
+          binding = "<Alt>F10";
+        };
       };
     }
   ];
@@ -181,14 +239,39 @@ in
   # permission prompt (the gsr-kms-server setcap wrapper grants the access), so
   # the service starts silently on every login. `-w DP-1` captures the monitor
   # we want; the other one is `DP-2` (see `gpu-screen-recorder --list-monitors`).
-  # Save the last 5 minutes any time with (Alt+F10 is bound to this via a GNOME
-  # custom keybinding in dconf):
+  # Save the last 5 minutes any time with (Alt+F10 is bound to this via the
+  # GNOME custom keybinding declared in programs.dconf above):
   #   systemctl --user kill --kill-whom=main -s SIGUSR1 gsr-replay.service
   # NOTE: --kill-whom=main is required. Without it, systemd signals every
   # process in the unit's cgroup, so SIGUSR1 also hits the gsr-kms-server helper
   # child and breaks KMS capture ("failed to get kms ... no drm found"), after
   # which all saves silently produce nothing. The flag targets only the main
   # gpu-screen-recorder process, which is what interprets SIGUSR1 as "save".
+  # Force the gsr_mic_boost filter-chain to load once the session is up, working
+  # around the early-boot PipeWire race (see gsrMicBoostHeal above). gsr-replay
+  # is ordered after this so the replay buffer never starts without the boosted
+  # mic. Kept separate from gsr-replay so the (occasional) pipewire restart isn't
+  # entangled with the recorder's own start/restart logic.
+  systemd.user.services.gsr-mic-boost = {
+    description = "Ensure the gsr_mic_boost filter-chain is loaded (heals early-boot pipewire race)";
+    wantedBy = [ "graphical-session.target" ];
+    partOf = [ "graphical-session.target" ];
+    after = [
+      "graphical-session.target"
+      "pipewire.service"
+      "wireplumber.service"
+      "easyeffects.service"
+    ];
+    wants = [ "pipewire.service" "wireplumber.service" "easyeffects.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${gsrMicBoostHeal}";
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+
   systemd.user.services.gsr-replay = {
     description = "GPU Screen Recorder — rolling 5-minute replay buffer";
     wantedBy = [ "graphical-session.target" ];
@@ -197,8 +280,26 @@ in
     # gsrWaitForMic ExecStartPre below additionally waits for the node to be
     # registered (the service is "started" the moment the process forks, before
     # the PipeWire node is up).
-    after = [ "graphical-session.target" "easyeffects.service" ];
-    wants = [ "easyeffects.service" ];
+    # Order after pipewire/wireplumber (which build the node graph and load the
+    # 99-gsr-mic-boost filter-chain) AND easyeffects (whose easyeffects_source
+    # the boost taps). Without the explicit pipewire/wireplumber ordering a
+    # rebuild that restarts the audio stack can leave gsr-replay started against
+    # a not-yet-loaded gsr_mic_boost node. Also order after gsr-mic-boost, which
+    # guarantees the filter-chain is actually loaded (it heals the early-boot
+    # pipewire race) before the recorder starts.
+    after = [
+      "graphical-session.target"
+      "pipewire.service"
+      "wireplumber.service"
+      "easyeffects.service"
+      "gsr-mic-boost.service"
+    ];
+    wants = [
+      "pipewire.service"
+      "wireplumber.service"
+      "easyeffects.service"
+      "gsr-mic-boost.service"
+    ];
     serviceConfig = {
       ExecStartPre = [
         "${pkgs.coreutils}/bin/mkdir -p %h/Videos"
@@ -303,81 +404,6 @@ in
     alsa.enable = true;
     pulse.enable = true;
 
-    # The Focusrite Clarett+ 8Pre exposes its 10 outputs as positionless
-    # AUX0..AUX9 channels. Native Linux apps (Discord/Firefox) remap stereo
-    # onto AUX0/AUX1 fine, but Wine/Proton can't open a device that advertises
-    # no FL/FR pair, so games get no audio. Relabel the first two channels as
-    # FL/FR (same physical outputs 1/2) so every app — including games — uses
-    # this one device. The other 8 channels stay available.
-    wireplumber.extraConfig."99-clarett-stereo" = {
-      "monitor.alsa.rules" = [
-        {
-          matches = [
-            { "node.name" = "alsa_output.usb-Focusrite_Clarett__8Pre_00011584-00.multichannel-output"; }
-          ];
-          actions.update-props = {
-            "audio.position" =
-              [ "FL" "FR" "AUX2" "AUX3" "AUX4" "AUX5" "AUX6" "AUX7" "AUX8" "AUX9" ];
-            # Push the raw 10-channel sink to the bottom of the device list so
-            # it's never auto-selected; the "Clarett+ 8Pre" loopback below wins.
-            "priority.session" = 100;
-            "priority.driver" = 100;
-          };
-        }
-        {
-          # The capture side needs no loopback (nothing requires a stereo input);
-          # there's only the one source, so just rename it to match the output.
-          matches = [
-            { "node.name" = "alsa_input.usb-Focusrite_Clarett__8Pre_00011584-00.multichannel-input"; }
-          ];
-          actions.update-props."node.description" = "Clarett+ 8Pre";
-        }
-      ];
-    };
-
-    # Wine/Proton won't open the Clarett directly even with FL/FR labels: it's a
-    # 10-channel device and FAudio wants a plain stereo sink (verified — relabel
-    # alone leaves games silent). Expose a genuine 2-channel "Game Stereo" sink
-    # and forward it to the Clarett's FL/FR (outputs 1/2, which the relabel above
-    # provides). Set this as the default output and every app — Discord, Firefox,
-    # games — funnels through it to the same physical outputs.
-    extraConfig.pipewire."99-game-stereo" = {
-      "context.modules" = [
-        {
-          name = "libpipewire-module-loopback";
-          args = {
-            "node.description" = "Clarett+ 8Pre";
-            "capture.props" = {
-              "node.name" = "game_stereo";
-              "node.description" = "Clarett+ 8Pre";
-              "media.class" = "Audio/Sink";
-              "audio.position" = [ "FL" "FR" ];
-              # Win default-device selection over the raw multichannel sink.
-              "priority.session" = 2000;
-            };
-            "playback.props" = {
-              "node.name" = "game_stereo.output";
-              "audio.position" = [ "FL" "FR" ];
-              # Hard-pin this loopback output to the Clarett and mark it as
-              # explicitly routed so the session manager never moves it to
-              # whatever the current default sink is. Without this, Easy Effects
-              # makes "easyeffects_sink" the default sink on start, the loopback
-              # output follows the default and gets relinked onto easyeffects_sink,
-              # and the signal loops easyeffects_sink -> game_stereo ->
-              # easyeffects_sink forever, never reaching the Clarett -> all output
-              # goes silent. `node.dont-reconnect` is what makes the pin sticky
-              # (the deprecated `node.target` only set the *initial* target and
-              # still let the node follow the default afterward).
-              "target.object" = "alsa_output.usb-Focusrite_Clarett__8Pre_00011584-00.multichannel-output";
-              "node.dont-reconnect" = true;
-              "stream.dont-remix" = true;
-              "node.passive" = true;
-            };
-          };
-        }
-      ];
-    };
-
     # Recording-only mic boost. The screen recorder (gsr-replay) should capture
     # the mic ~50% louder than everyone else hears it, WITHOUT changing the level
     # other apps (Discord/Firefox) get from "easyeffects_source". So tap the
@@ -407,7 +433,7 @@ in
               # Run only while gsr is recording this node.
               "node.passive" = true;
               # Always pull from the Easy Effects processed mic, never follow the
-              # default source (same sticky-pin trick as the game_stereo loopback).
+              # default source (`node.dont-reconnect` makes the pin sticky).
               "target.object" = "easyeffects_source";
               "node.dont-reconnect" = true;
               "stream.dont-remix" = true;
