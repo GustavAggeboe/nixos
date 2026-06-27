@@ -29,21 +29,23 @@ let
       "$tmp" && mv -f "$tmp" "$file"
   '';
 
-  # The replay buffer records the mic from Easy Effects' virtual source
-  # ("easyeffects_source") so the captured mic is noise-suppressed/processed
-  # rather than raw. That node only exists once the easyeffects user service
-  # has started and registered it with PipeWire. At login the replay service
-  # can otherwise win the race and start before the node exists, silently
-  # dropping the mic track — so poll (up to ~30s) until it appears first.
-  gsrWaitForMic = pkgs.writeShellScript "gsr-wait-for-easyeffects-source" ''
+  # The replay buffer records the mic from the "gsr_mic_boost" virtual source
+  # (a +50% gain filter-chain fed by Easy Effects' processed "easyeffects_source"
+  # — see the 99-gsr-mic-boost pipewire config). The boost node is created by
+  # pipewire and only links once easyeffects_source exists, so it only carries
+  # real audio after the easyeffects user service has registered that upstream.
+  # At login the replay service can otherwise win the race and start before the
+  # node is enumerable, silently dropping the mic track — so poll (up to ~30s)
+  # until gsr can see the boost source first.
+  gsrWaitForMic = pkgs.writeShellScript "gsr-wait-for-mic-boost" ''
     for _ in $(seq 1 60); do
       if ${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder --list-audio-devices \
-           | ${pkgs.gnugrep}/bin/grep -q '^easyeffects_source|'; then
+           | ${pkgs.gnugrep}/bin/grep -q '^gsr_mic_boost|'; then
         exit 0
       fi
       sleep 0.5
     done
-    echo "gsr-replay: easyeffects_source not found after timeout; starting anyway" >&2
+    echo "gsr-replay: gsr_mic_boost not found after timeout; starting anyway" >&2
     exit 0
   '';
 
@@ -205,7 +207,7 @@ in
       # The mic tracks use "easyeffects_source" (Easy Effects' processed virtual
       # source) instead of "default_input", so recordings get the noise-
       # suppressed mic. Track layout: Mixed (desktop+mic), Desktop, Microphone.
-      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-1 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|easyeffects_source\" -a default_output -a easyeffects_source -sc ${gsrSaveScript} -o %h/Videos/";
+      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-1 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|gsr_mic_boost\" -a default_output -a gsr_mic_boost -sc ${gsrSaveScript} -o %h/Videos/";
       # Retry if the portal/PipeWire isn't ready yet at login.
       Restart = "on-failure";
       RestartSec = 5;
@@ -370,6 +372,53 @@ in
               "node.dont-reconnect" = true;
               "stream.dont-remix" = true;
               "node.passive" = true;
+            };
+          };
+        }
+      ];
+    };
+
+    # Recording-only mic boost. The screen recorder (gsr-replay) should capture
+    # the mic ~50% louder than everyone else hears it, WITHOUT changing the level
+    # other apps (Discord/Firefox) get from "easyeffects_source". So tap the
+    # processed Easy Effects source through a filter-chain that applies a fixed
+    # +50% amplitude gain (linear Mult = 1.5, ~+3.5 dB) and expose the result as
+    # a separate virtual source "gsr_mic_boost" that ONLY gsr-replay records.
+    # node.passive on the capture side keeps the filter idle until gsr actually
+    # opens it, so it costs nothing when not recording.
+    extraConfig.pipewire."99-gsr-mic-boost" = {
+      "context.modules" = [
+        {
+          name = "libpipewire-module-filter-chain";
+          args = {
+            "node.description" = "GSR Mic Boost (+50%)";
+            "media.name" = "GSR Mic Boost";
+            "filter.graph" = {
+              nodes = [
+                { type = "builtin"; name = "gain_FL"; label = "linear"; control = { "Mult" = 1.5; "Add" = 0.0; }; }
+                { type = "builtin"; name = "gain_FR"; label = "linear"; control = { "Mult" = 1.5; "Add" = 0.0; }; }
+              ];
+              inputs = [ "gain_FL:In" "gain_FR:In" ];
+              outputs = [ "gain_FL:Out" "gain_FR:Out" ];
+            };
+            "audio.position" = [ "FL" "FR" ];
+            "capture.props" = {
+              "node.name" = "gsr_mic_boost.input";
+              # Run only while gsr is recording this node.
+              "node.passive" = true;
+              # Always pull from the Easy Effects processed mic, never follow the
+              # default source (same sticky-pin trick as the game_stereo loopback).
+              "target.object" = "easyeffects_source";
+              "node.dont-reconnect" = true;
+              "stream.dont-remix" = true;
+            };
+            "playback.props" = {
+              "node.name" = "gsr_mic_boost";
+              "node.description" = "GSR Mic Boost (+50%)";
+              "media.class" = "Audio/Source";
+              "audio.position" = [ "FL" "FR" ];
+              # Keep it out of normal app/default selection — only gsr records it.
+              "priority.session" = 100;
             };
           };
         }
