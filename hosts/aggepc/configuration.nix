@@ -160,6 +160,19 @@ in
   services.displayManager.gdm.enable = true;
   services.desktopManager.gnome.enable = true;
 
+  # Flatpak + Flathub. Needed for Sober (org.vinegarhq.Sober), the only
+  # working way to run the Roblox player on Linux (runs the Android client;
+  # the old Wine route is blocked by Roblox's Hyperion anti-cheat).
+  services.flatpak.enable = true;
+  systemd.services.flatpak-repo = {
+    wantedBy = [ "multi-user.target" ];
+    path = [ pkgs.flatpak ];
+    script = ''
+      flatpak remote-add --if-not-exists \
+        flathub https://flathub.org/repo/flathub.flatpakrepo
+    '';
+  };
+
   # Show minimize and maximize buttons on window titlebars (GNOME only shows
   # close by default).
   programs.dconf.profiles.user.databases = [
