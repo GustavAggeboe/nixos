@@ -112,6 +112,9 @@ in
 
   # Use the systemd-boot EFI boot loader.
   boot.loader = {
+    # Wait indefinitely at the menu for a manual selection instead of
+    # counting down and auto-booting the default entry.
+    timeout = null;
     efi.canTouchEfiVariables = true;
     systemd-boot = {
       # To find out the 'efiDeviceHandle' value for 'windows', boot into this and
@@ -233,6 +236,8 @@ in
     # calls to handle .7z (and other) archives.
     file-roller
     p7zip
+
+    ffmpeg  # CLI audio/video transcoding and processing
   ];
 
   # Install gpu-screen-recorder via its NixOS module rather than just dropping
@@ -349,6 +354,35 @@ in
       ExecStart = "${pkgs.easyeffects}/bin/easyeffects --gapplication-service";
       ExecStop = "${pkgs.easyeffects}/bin/easyeffects --quit";
       # PipeWire/WirePlumber may not be ready yet at login; retry until they are.
+      Restart = "on-failure";
+      RestartSec = 5;
+    };
+  };
+
+  # Autostart RustDesk's background service on login so the machine accepts
+  # incoming remote-desktop connections without anyone opening the app. RustDesk
+  # is normally driven by a privileged `--service` worker that does the screen
+  # capture, input injection and connection handling; the GUI/tray only talks to
+  # it over IPC and shows your ID/password. Run it as a *user* service inside the
+  # graphical session (not a root system service) so it can reach this Wayland
+  # session's screencast portal and PipeWire — a root daemon can't capture a
+  # Wayland session.
+  #
+  # NOTE: this makes RustDesk *running and reachable* after login; to connect
+  # without anyone clicking "Accept" at the machine you still have to set a
+  # permanent password once: open RustDesk → Settings → Security → set a
+  # permanent password (and note the ID shown in the main window). On Wayland the
+  # very first incoming connection also pops the GNOME screen-share approval; once
+  # approved RustDesk stores a restore token and later connections are silent.
+  systemd.user.services.rustdesk = {
+    description = "RustDesk — remote desktop service (unattended access)";
+    wantedBy = [ "graphical-session.target" ];
+    partOf = [ "graphical-session.target" ];
+    after = [ "graphical-session.target" "pipewire.service" "wireplumber.service" ];
+    wants = [ "pipewire.service" "wireplumber.service" ];
+    serviceConfig = {
+      ExecStart = "${rustdesk-wayland}/bin/rustdesk --service";
+      # Portal/PipeWire may not be ready the instant the session starts; retry.
       Restart = "on-failure";
       RestartSec = 5;
     };
