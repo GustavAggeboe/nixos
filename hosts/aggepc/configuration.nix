@@ -276,6 +276,7 @@ in
     p7zip
 
     ffmpeg  # CLI audio/video transcoding and processing
+    spek  # Spectrogram viewer — inspect an audio file's frequency content over time
   ];
 
   # Install gpu-screen-recorder via its NixOS module rather than just dropping
