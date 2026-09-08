@@ -12,15 +12,23 @@ let
   # Where the replay buffer saves clips. `%h` is systemd's home-directory
   # specifier, expanded by the user service at runtime.
   gsrReplayDir = "%h/Videos/Replays";
-  # Save hook for the replay buffer: GSR can't name audio tracks itself, so
-  # after each save we remux the clip (stream copy, no re-encode) and tag the
-  # three tracks. MP4 can't store per-track titles, so recordings use MKV.
-  gsrSaveScript = pkgs.writeShellScript "gsr-name-audio-tracks" ''
+  # Save hook for the replay buffer. Two jobs:
+  #  1. GSR can't name audio tracks itself, so after each save we remux the
+  #     clip (stream copy, no re-encode) and tag the three tracks. MP4 can't
+  #     store per-track titles, so recordings use MKV.
+  #  2. Sort the clip into a per-game subfolder (Replays/<game>/...) named after
+  #     the focused window, like upstream's record-save-application-name.sh.
+  #     That script uses xdotool, which is X11-only; on GNOME Wayland we ask the
+  #     "Focused Window D-Bus" shell extension instead (installed below, must be
+  #     enabled once with `gnome-extensions enable focused-window-dbus@flexagoon.com`).
+  #     If the extension isn't available the clip goes to Replays/Unsorted/.
+  gsrSaveScript = pkgs.writeShellScript "gsr-save-hook" ''
     # GSR runs this with: $1 = saved file path, $2 = type (replay/regular/screenshot).
     file="$1"
     type="$2"
     case "$type" in screenshot) exit 0 ;; esac
-    tmp="$(dirname "$file")/.gsr-retitle.mkv"
+    dir="$(dirname "$file")"
+    tmp="$dir/.gsr-retitle.mkv"
     ${pkgs.ffmpeg-headless}/bin/ffmpeg -y -nostdin -v error -i "$file" \
       -map 0 -c copy -f matroska \
       -metadata:s:a:0 title="Mixed" \
@@ -30,6 +38,20 @@ let
       -disposition:a:1 0 \
       -disposition:a:2 0 \
       "$tmp" && mv -f "$tmp" "$file"
+
+    # Focused window title (falling back to its WM class), with path separators
+    # replaced so it is safe as a single directory name.
+    game="$(${pkgs.glib}/bin/gdbus call --session --dest org.gnome.Shell \
+        --object-path /org/gnome/shell/extensions/FocusedWindow \
+        --method org.gnome.shell.extensions.FocusedWindow.Get 2>/dev/null \
+      | ${pkgs.python3}/bin/python3 -c '
+    import ast, json, sys
+    win = json.loads(ast.literal_eval(sys.stdin.read().strip())[0])
+    name = (win.get("title") or win.get("wm_class") or "").strip()
+    print(name.replace("/", "_").replace("\\", "_"))
+    ' 2>/dev/null)"
+    [ -n "$game" ] || game="Unsorted"
+    mkdir -p "$dir/$game" && mv -f "$file" "$dir/$game/"
   '';
 
   # The replay buffer records the mic from the "gsr_mic_boost" virtual source
@@ -271,6 +293,10 @@ in
     # `programs.gpu-screen-recorder.enable` below (which also sets up the
     # setcap wrapper for promptless recording).
     gpu-screen-recorder-gtk  # optional GTK GUI / tray frontend
+    # Exposes the focused window's title over D-Bus; gsrSaveScript uses it to
+    # sort replays into per-game folders. Enable once after install:
+    #   gnome-extensions enable focused-window-dbus@flexagoon.com
+    gnomeExtensions.focused-window-d-bus
     libva-utils              # `vainfo` — verify hardware encode works
 
     # GUI archive extraction. file-roller is GNOME's "Archive Manager"
