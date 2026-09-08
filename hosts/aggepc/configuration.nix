@@ -9,6 +9,9 @@ let
     tryEval
     attrValues
     ;
+  # Where the replay buffer saves clips. `%h` is systemd's home-directory
+  # specifier, expanded by the user service at runtime.
+  gsrReplayDir = "%h/Videos/Replays";
   # Save hook for the replay buffer: GSR can't name audio tracks itself, so
   # after each save we remux the clip (stream copy, no re-encode) and tag the
   # three tracks. MP4 can't store per-track titles, so recordings use MKV.
@@ -360,13 +363,13 @@ in
     ];
     serviceConfig = {
       ExecStartPre = [
-        "${pkgs.coreutils}/bin/mkdir -p %h/Videos"
+        "${pkgs.coreutils}/bin/mkdir -p ${gsrReplayDir}"
         "${gsrWaitForMic}"
       ];
       # The mic tracks use "easyeffects_source" (Easy Effects' processed virtual
       # source) instead of "default_input", so recordings get the noise-
       # suppressed mic. Track layout: Mixed (desktop+mic), Desktop, Microphone.
-      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-1 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|gsr_mic_boost\" -a default_output -a gsr_mic_boost -sc ${gsrSaveScript} -o %h/Videos/";
+      ExecStart = "${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder -w DP-1 -c mkv -k hevc -f 60 -r 300 -restart-replay-on-save yes -a \"default_output|gsr_mic_boost\" -a default_output -a gsr_mic_boost -sc ${gsrSaveScript} -o ${gsrReplayDir}/";
       # Retry if the portal/PipeWire isn't ready yet at login.
       Restart = "on-failure";
       RestartSec = 5;
