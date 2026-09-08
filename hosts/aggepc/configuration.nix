@@ -247,6 +247,7 @@ in
     helix
     vim
     git
+    gh
     alsa-scarlett-gui
     easyeffects  # Audio effects (input noise suppression via RNNoise; tune in GUI)
     discord
