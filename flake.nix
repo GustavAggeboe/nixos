@@ -10,6 +10,11 @@
     # Its flake exposes only nixosModules.default and declares no `nixpkgs`
     # input to follow; the kernel module is built against this system's kernel.
     maccel.url = "github:Gnarus-G/maccel";
+    # Official Claude desktop app (Chat, Cowork, Code) repackaged for Nix.
+    claude-desktop = {
+      url = "github:nmcbride/claude-desktop-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -64,6 +69,15 @@
             ./hosts/aggepc/configuration.nix
             ./modules/linker.nix
             ./modules/mouse.nix
+
+            # Claude desktop app. Cowork's sandbox VM needs /dev/kvm, hence kvmUsers.
+            inputs.claude-desktop.nixosModules.default
+            {
+              programs.claude-desktop = {
+                enable = true;
+                cowork.kvmUsers = [ "gustav" ];
+              };
+            }
           ];
         };
         

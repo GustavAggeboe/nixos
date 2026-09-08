@@ -1,5 +1,25 @@
 {
   "nodes": {
+    "claude-desktop": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1788344264,
+        "narHash": "sha256-5zVbZnJlinktszkIMrE3zNw0jrOSUrIIbzoVUr75uek=",
+        "owner": "nmcbride",
+        "repo": "claude-desktop-nix",
+        "rev": "2479d51149838ddf049fdcd8cefe360ce904ed00",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nmcbride",
+        "repo": "claude-desktop-nix",
+        "type": "github"
+      }
+    },
     "hytale-flake": {
       "inputs": {
         "nixpkgs": [
@@ -52,6 +72,7 @@
     },
     "root": {
       "inputs": {
+        "claude-desktop": "claude-desktop",
         "hytale-flake": "hytale-flake",
         "maccel": "maccel",
         "nixpkgs": "nixpkgs"

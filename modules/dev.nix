@@ -44,6 +44,9 @@ in
     # Github authenticator.
     gh
 
+    # Google Cloud CLI (gcloud, gsutil, bq).
+    google-cloud-sdk
+
     # GPU Tooling
     vulkan-tools
 

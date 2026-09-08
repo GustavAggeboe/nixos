@@ -31,19 +31,17 @@ let
 
   # The replay buffer records the mic from the "gsr_mic_boost" virtual source
   # (a gain-boosted filter-chain fed by Easy Effects' processed "easyeffects_source"
-  # — see the 99-gsr-mic-boost pipewire config). The boost node is created by
-  # pipewire and only links once easyeffects_source exists, so it only carries
-  # real audio after the easyeffects user service has registered that upstream.
-  # At login the replay service can otherwise win the race and start before the
-  # node is enumerable, silently dropping the mic track — so poll (up to ~30s)
-  # until gsr can see the boost source first.
+  # — created by the gsr-mic-boost.service filter-chain process below). That
+  # service starts only after easyeffects has registered easyeffects_source, so
+  # the boost links its upstream cleanly. gsr-replay is ordered after it, but the
+  # service being "started" only means the process forked — the PipeWire node can
+  # take a moment more to enumerate — so also poll (up to ~30s) until gsr can see
+  # the boost source before launching the recorder.
   #
   # On timeout we exit NON-ZERO so the unit's `Restart=on-failure` retries the
   # whole service rather than launching gpu-screen-recorder against a missing
   # `gsr_mic_boost` (which makes gsr exit immediately and crash-loop, leaving no
-  # replay buffer for Alt+F10 to save). This recovers automatically if pipewire
-  # is slow to load the 99-gsr-mic-boost filter-chain (e.g. it was started with
-  # stale config and the node only appears after a later pipewire restart).
+  # replay buffer for Alt+F10 to save).
   gsrWaitForMic = pkgs.writeShellScript "gsr-wait-for-mic-boost" ''
     for _ in $(seq 1 60); do
       if ${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder --list-audio-devices \
@@ -56,35 +54,74 @@ let
     exit 1
   '';
 
-  # Heals an early-boot PipeWire race. At login the PipeWire daemon starts very
-  # early (before the session is fully settled) and silently fails to load the
-  # 99-gsr-mic-boost filter-chain module — the daemon keeps running fine but
-  # `gsr_mic_boost` never appears, so every fresh boot loses the boosted mic and
-  # gsr-replay has nothing to record/save. The failure isn't logged (the main
-  # pipewire daemon is silent at the default log level), but it's perfectly
-  # reproducible: restarting the audio stack *after* the session is up always
-  # loads the module. So once everything is up, check for the node and, only if
-  # it's missing, restart pipewire/wireplumber to force the module to (re)load.
-  # This runs at login before any audio is in use, so the brief restart is
-  # harmless; on boots where the daemon did load the filter-chain it's a no-op.
-  gsrMicBoostHeal = pkgs.writeShellScript "gsr-mic-boost-heal" ''
-    has_node() {
-      ${pkgs.gpu-screen-recorder}/bin/gpu-screen-recorder --list-audio-devices \
-        | ${pkgs.gnugrep}/bin/grep -q '^gsr_mic_boost|'
+  # Recording-only mic boost, run as its OWN PipeWire client process (see
+  # gsr-mic-boost.service). The screen recorder should capture the mic louder
+  # than everyone else hears it WITHOUT changing the level other apps
+  # (Discord/Firefox) get from "easyeffects_source". So tap the processed Easy
+  # Effects source through a filter-chain that applies a fixed linear amplitude
+  # gain (the `Mult` control — 1.0 = unity, higher = louder) and expose the
+  # result as a separate virtual source "gsr_mic_boost" that ONLY gsr-replay
+  # records. `node.passive` on the capture side keeps the filter idle until gsr
+  # actually opens it, so it costs nothing when not recording.
+  #
+  # Why a dedicated `pipewire -c` process instead of loading this filter-chain as
+  # a `context.module` in the main daemon (services.pipewire.extraConfig): the
+  # in-daemon module is created at daemon start, BEFORE easyeffects registers
+  # easyeffects_source, so with the target pinned it silently fails to appear and
+  # the boosted mic is missing on every boot. The old workaround restarted the
+  # whole pipewire/wireplumber stack at login to force a reload — but that ripped
+  # the PipeWire connection out from under the already-running easyeffects, which
+  # core-dumped and came back with its output chain mis-routed, so speaker output
+  # was silent until you manually reselected the sink. Running the filter-chain
+  # as a separate client started AFTER easyeffects removes both problems: nothing
+  # restarts the daemon, and easyeffects_source already exists so the boost links
+  # first try.
+  gsrMicBoostConf = pkgs.writeText "gsr-mic-boost.conf" ''
+    context.properties = { log.level = 0 }
+    context.spa-libs = {
+      audio.convert.* = audioconvert/libspa-audioconvert
+      support.*       = support/libspa-support
     }
-    # Give the boot pipewire a brief chance to have loaded it already.
-    for _ in $(seq 1 20); do
-      has_node && exit 0
-      sleep 0.5
-    done
-    echo "gsr-mic-boost: node missing; restarting pipewire/wireplumber to load the filter-chain" >&2
-    ${pkgs.systemd}/bin/systemctl --user restart pipewire.service wireplumber.service
-    for _ in $(seq 1 40); do
-      has_node && exit 0
-      sleep 0.5
-    done
-    echo "gsr-mic-boost: node still missing after pipewire restart" >&2
-    exit 1
+    context.modules = [
+      { name = libpipewire-module-rt args = { } flags = [ ifexists nofail ] }
+      { name = libpipewire-module-protocol-native }
+      { name = libpipewire-module-client-node }
+      { name = libpipewire-module-adapter }
+      { name = libpipewire-module-filter-chain
+        args = {
+          node.description = "GSR Mic Boost"
+          media.name       = "GSR Mic Boost"
+          filter.graph = {
+            nodes = [
+              { type = builtin name = gain_FL label = linear control = { Mult = 2.0 Add = 0.0 } }
+              { type = builtin name = gain_FR label = linear control = { Mult = 2.0 Add = 0.0 } }
+            ]
+            inputs  = [ "gain_FL:In" "gain_FR:In" ]
+            outputs = [ "gain_FL:Out" "gain_FR:Out" ]
+          }
+          audio.position = [ FL FR ]
+          capture.props = {
+            node.name         = gsr_mic_boost.input
+            # Run only while gsr is recording this node.
+            node.passive      = true
+            # Always pull from the Easy Effects processed mic, never follow the
+            # default source (`node.dont-reconnect` makes the pin sticky). This
+            # process starts after easyeffects, so the target already exists.
+            target.object     = easyeffects_source
+            node.dont-reconnect = true
+            stream.dont-remix = true
+          }
+          playback.props = {
+            node.name        = gsr_mic_boost
+            node.description = "GSR Mic Boost"
+            media.class      = Audio/Source
+            audio.position   = [ FL FR ]
+            # Keep it out of normal app/default selection — only gsr records it.
+            priority.session = 100
+          }
+        }
+      }
+    ]
   '';
 
   # nixpkgs' `rustdesk` (sciter) wrapper builds its GStreamer plugin path from
@@ -148,7 +185,7 @@ in
   # networking.proxy.noProxy = "127.0.0.1,localhost,internal.domain";
 
   # Select internationalisation properties.
-  # i18n.defaultLocale = "en_US.UTF-8";
+  i18n.defaultLocale = "en_GB.UTF-8";
   # console = {
   #   font = "Lat2-Terminus16";
   #   keyMap = "us";
@@ -213,6 +250,7 @@ in
     alsa-scarlett-gui
     easyeffects  # Audio effects (input noise suppression via RNNoise; tune in GUI)
     discord
+    google-chrome  # Google Chrome (unfree; allowUnfree is set in modules/nixos.nix)
     rustdesk-wayland  # Remote desktop client (pipewire gst plugin added for Wayland)
     jetbrains.idea  # IntelliJ IDEA Ultimate (swap to .idea-community for the free edition)
     nodejs  # provides node, npm and npx
@@ -265,26 +303,28 @@ in
   # child and breaks KMS capture ("failed to get kms ... no drm found"), after
   # which all saves silently produce nothing. The flag targets only the main
   # gpu-screen-recorder process, which is what interprets SIGUSR1 as "save".
-  # Force the gsr_mic_boost filter-chain to load once the session is up, working
-  # around the early-boot PipeWire race (see gsrMicBoostHeal above). gsr-replay
-  # is ordered after this so the replay buffer never starts without the boosted
-  # mic. Kept separate from gsr-replay so the (occasional) pipewire restart isn't
-  # entangled with the recorder's own start/restart logic.
+  # The recording-only mic boost filter-chain (gsrMicBoostConf above), run as its
+  # own PipeWire client process. Started AFTER easyeffects so its upstream
+  # "easyeffects_source" already exists and the boost links first try — no daemon
+  # restart, no race. `bindsTo` easyeffects so if the effects daemon restarts,
+  # this re-runs and re-pins to the fresh easyeffects_source. gsr-replay is
+  # ordered after this so the replay buffer never starts without the boosted mic.
   systemd.user.services.gsr-mic-boost = {
-    description = "Ensure the gsr_mic_boost filter-chain is loaded (heals early-boot pipewire race)";
+    description = "GSR Mic Boost — recording-only gain filter-chain (PipeWire client)";
     wantedBy = [ "graphical-session.target" ];
     partOf = [ "graphical-session.target" ];
+    bindsTo = [ "easyeffects.service" ];
     after = [
       "graphical-session.target"
       "pipewire.service"
       "wireplumber.service"
       "easyeffects.service"
     ];
-    wants = [ "pipewire.service" "wireplumber.service" "easyeffects.service" ];
+    wants = [ "pipewire.service" "wireplumber.service" ];
     serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      ExecStart = "${gsrMicBoostHeal}";
+      ExecStart = "${pkgs.pipewire}/bin/pipewire -c ${gsrMicBoostConf}";
+      # PipeWire/easyeffects may still be settling at login; retry until the
+      # upstream source is there to link.
       Restart = "on-failure";
       RestartSec = 5;
     };
@@ -298,13 +338,11 @@ in
     # gsrWaitForMic ExecStartPre below additionally waits for the node to be
     # registered (the service is "started" the moment the process forks, before
     # the PipeWire node is up).
-    # Order after pipewire/wireplumber (which build the node graph and load the
-    # 99-gsr-mic-boost filter-chain) AND easyeffects (whose easyeffects_source
-    # the boost taps). Without the explicit pipewire/wireplumber ordering a
-    # rebuild that restarts the audio stack can leave gsr-replay started against
-    # a not-yet-loaded gsr_mic_boost node. Also order after gsr-mic-boost, which
-    # guarantees the filter-chain is actually loaded (it heals the early-boot
-    # pipewire race) before the recorder starts.
+    # Order after pipewire/wireplumber (which build the node graph) AND
+    # gsr-mic-boost (the filter-chain client that creates the gsr_mic_boost
+    # source this recorder captures). Without the explicit pipewire/wireplumber
+    # ordering a rebuild that restarts the audio stack can leave gsr-replay
+    # started against a not-yet-loaded gsr_mic_boost node.
     after = [
       "graphical-session.target"
       "pipewire.service"
@@ -450,51 +488,38 @@ in
     enable = true;
     alsa.enable = true;
     pulse.enable = true;
+    # The recording-only mic boost is NOT loaded here as an in-daemon
+    # context.module — it races the daemon start (before easyeffects_source
+    # exists) and silently fails to appear. It runs instead as its own PipeWire
+    # client process started after easyeffects: see gsrMicBoostConf and
+    # systemd.user.services.gsr-mic-boost above.
 
-    # Recording-only mic boost. The screen recorder (gsr-replay) should capture
-    # the mic louder than everyone else hears it, WITHOUT changing the level
-    # other apps (Discord/Firefox) get from "easyeffects_source". So tap the
-    # processed Easy Effects source through a filter-chain that applies a fixed
-    # linear amplitude gain (the `Mult` control below — 1.0 = unity, higher =
-    # louder) and expose the result as a separate virtual source "gsr_mic_boost"
-    # that ONLY gsr-replay records.
-    # node.passive on the capture side keeps the filter idle until gsr actually
-    # opens it, so it costs nothing when not recording.
-    extraConfig.pipewire."99-gsr-mic-boost" = {
-      "context.modules" = [
+    # Keep the Focusrite Clarett+ 8Pre as the default CAPTURE device.
+    # EasyEffects follows the default source (verified: setting the default to
+    # the Clarett makes EE's input chain re-link to it immediately), so if the
+    # Clarett isn't the highest-priority source at login, EE grabs whatever is —
+    # in practice the Webcam C270's mono mic — and the real mic goes dead until
+    # the source is switched by hand. Nothing pinned the Clarett after the old
+    # `99-clarett-stereo` rule was removed with game_stereo, so give its input a
+    # high priority.session (default source = highest priority) and demote the
+    # webcam mic so it can never win the default again.
+    wireplumber.extraConfig."51-clarett-default-input" = {
+      "monitor.alsa.rules" = [
         {
-          name = "libpipewire-module-filter-chain";
-          args = {
-            "node.description" = "GSR Mic Boost";
-            "media.name" = "GSR Mic Boost";
-            "filter.graph" = {
-              nodes = [
-                { type = "builtin"; name = "gain_FL"; label = "linear"; control = { "Mult" = 2.0; "Add" = 0.0; }; }
-                { type = "builtin"; name = "gain_FR"; label = "linear"; control = { "Mult" = 2.0; "Add" = 0.0; }; }
-              ];
-              inputs = [ "gain_FL:In" "gain_FR:In" ];
-              outputs = [ "gain_FL:Out" "gain_FR:Out" ];
-            };
-            "audio.position" = [ "FL" "FR" ];
-            "capture.props" = {
-              "node.name" = "gsr_mic_boost.input";
-              # Run only while gsr is recording this node.
-              "node.passive" = true;
-              # Always pull from the Easy Effects processed mic, never follow the
-              # default source (`node.dont-reconnect` makes the pin sticky).
-              "target.object" = "easyeffects_source";
-              "node.dont-reconnect" = true;
-              "stream.dont-remix" = true;
-            };
-            "playback.props" = {
-              "node.name" = "gsr_mic_boost";
-              "node.description" = "GSR Mic Boost";
-              "media.class" = "Audio/Source";
-              "audio.position" = [ "FL" "FR" ];
-              # Keep it out of normal app/default selection — only gsr records it.
-              "priority.session" = 100;
-            };
+          matches = [
+            { "node.name" = "alsa_input.usb-Focusrite_Clarett__8Pre_00011584-00.multichannel-input"; }
+          ];
+          actions.update-props = {
+            "priority.session" = 2000;
+            "node.description" = "Clarett+ 8Pre";
           };
+        }
+        {
+          # Webcam mic: last-resort only, never the auto-selected default.
+          matches = [
+            { "node.name" = "alsa_input.usb-046d_0825_C2C53110-02.mono-fallback"; }
+          ];
+          actions.update-props."priority.session" = 0;
         }
       ];
     };
