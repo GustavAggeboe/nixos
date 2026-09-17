@@ -141,12 +141,124 @@ let
             node.description = "GSR Mic Boost"
             media.class      = Audio/Source
             audio.position   = [ FL FR ]
-            # Keep it out of normal app/default selection — only gsr records it.
-            priority.session = 100
+            # Keep it out of normal app/default selection — only gsr records it
+            # (gsr targets it by node.name, which ignores priority). This MUST be
+            # lower than every real capture source: EasyEffects' input follows the
+            # highest-priority source, so if the boost ever outranks the real mic
+            # while the Clarett is absent, EE links its input to gsr_mic_boost —
+            # and since the boost taps easyeffects_source (EE's own output) that
+            # closes a silent feedback loop with no hardware mic in it. Was 100,
+            # which beat the demoted webcam (0) and caused exactly that loop; 0 so
+            # it never wins (the webcam, bumped to 20 below, is the last resort).
+            priority.session = 0
           }
         }
       }
     ]
+  '';
+
+  # Fix for: "Easy Effects Source stops working when I power the interface on
+  # AFTER the PC is already running" (works fine when it's on before boot).
+  #
+  # EasyEffects picks its input device ONCE at startup and does not move it when a
+  # higher-priority device appears later. If the Clarett is absent when EE starts
+  # (powered on late, or a slow/again USB enumeration — observed enumerating ~38s
+  # after EE on a normal boot), EE grabs the best source that exists at that
+  # instant and stays there. With the boost priority bug above that was
+  # gsr_mic_boost, which taps EE's own easyeffects_source → a silent feedback loop
+  # (Clarett capture completely unlinked); after the priority fix it falls back to
+  # the webcam. Either way the real mic never gets linked when the Clarett shows
+  # up later.
+  #
+  # A fresh, ORDERED restart with the Clarett present relinks correctly every time
+  # (verified live): easyeffects re-selects the Clarett (priority 2000), then
+  # gsr-mic-boost re-pins to the now-present easyeffects_source (a plain
+  # `systemctl restart easyeffects` is NOT enough — its bindsTo bounce of
+  # gsr-mic-boost races easyeffects_source and can leave the boost on the raw
+  # Clarett), then gsr-replay reattaches. This script performs that reconcile, but
+  # only when needed: it no-ops when EE's input is already the Clarett (the normal
+  # "interface on before boot" path). Invoked from two places — a udev rule on the
+  # Clarett's USB add (hot-plug), and a once-at-login user service (boot) — see the
+  # systemd units below.
+  clarettAudioReconcile = pkgs.writeShellScript "clarett-audio-reconcile" ''
+    set -u
+    export PATH="${lib.makeBinPath [ pkgs.pipewire config.systemd.package pkgs.gnugrep pkgs.gawk pkgs.coreutils ]}"
+    # gustav is the single normal user (uid 1000); its user PipeWire socket and
+    # user systemd manager live under this runtime dir. `systemctl --user` and the
+    # user graph need only XDG_RUNTIME_DIR, so this script works both as a user
+    # service and as a root-started `User=gustav` system service (the udev half).
+    export XDG_RUNTIME_DIR="/run/user/1000"
+    CAP="alsa_input.usb-Focusrite_Clarett__8Pre_00011584-00.multichannel-input"
+
+    log() { echo "clarett-reconcile: $*"; }
+
+    # No graphical session yet (Clarett present at early-boot coldplug, or plugged
+    # in at the login screen) → nothing to reconcile; the session's own startup or
+    # a later USB event will handle it.
+    if [ ! -S "$XDG_RUNTIME_DIR/pipewire-0" ]; then
+      log "no user PipeWire socket — not logged in; skipping"
+      exit 0
+    fi
+
+    # True when EasyEffects' input chain head is fed by the Clarett capture.
+    ee_on_clarett() {
+      pw-link -l 2>/dev/null | awk -v cap="$CAP:capture_AUX0" '
+        /^[^[:space:]]/ { inblk = (index($0, cap) == 1) }
+        inblk && /\|-> ee_sie_[^:]*:input/ { found = 1 }
+        END { exit found ? 0 : 1 }
+      '
+    }
+
+    # 1. The USB add fires before PipeWire has created the capture node — wait for
+    #    it to appear (up to ~30s).
+    for _ in $(seq 1 60); do
+      pw-link -o 2>/dev/null | grep -Fq "$CAP:capture_AUX0" && break
+      sleep 0.5
+    done
+    if ! pw-link -o 2>/dev/null | grep -Fq "$CAP:capture_AUX0"; then
+      log "Clarett capture node never appeared — giving up"
+      exit 0
+    fi
+
+    # 2. Wait for EasyEffects to be up with its input chain, then let it settle so
+    #    a mid-startup EE is not mistaken for a broken one.
+    for _ in $(seq 1 60); do
+      if systemctl --user is-active --quiet easyeffects.service \
+         && pw-link -i 2>/dev/null | grep -q "ee_sie_.*:input_FL"; then
+        break
+      fi
+      sleep 0.5
+    done
+    sleep 2
+
+    # 3. Already correct → done (normal "interface on before boot" path).
+    if ee_on_clarett; then
+      log "EasyEffects input already on the Clarett — nothing to do"
+      exit 0
+    fi
+
+    # 4. Wrong (loop / webcam fallback / unlinked) → known-good ordered restart.
+    log "EasyEffects input is NOT on the Clarett — performing ordered restart"
+    systemctl --user restart easyeffects.service
+    for _ in $(seq 1 60); do
+      pw-link -o 2>/dev/null | grep -Fq "easyeffects_source:capture_FL" && break
+      sleep 0.5
+    done
+    # bindsTo already bounced gsr-mic-boost when EE restarted, but that bounce
+    # races easyeffects_source; restart it again now that the source is up so it
+    # re-pins to the processed mic rather than the raw Clarett.
+    systemctl --user restart gsr-mic-boost.service
+    for _ in $(seq 1 60); do
+      pw-link -l 2>/dev/null | awk '
+        /^easyeffects_source:capture_FL/ { inblk = 1; next }
+        /^[^[:space:]]/ { inblk = 0 }
+        inblk && /\|-> gsr_mic_boost\.input/ { found = 1 }
+        END { exit found ? 0 : 1 }
+      ' && break
+      sleep 0.5
+    done
+    systemctl --user restart gsr-replay.service
+    log "ordered restart complete"
   '';
 
   # nixpkgs' `rustdesk` (sciter) wrapper builds its GStreamer plugin path from
@@ -428,6 +540,47 @@ in
     };
   };
 
+  # Reconcile EasyEffects onto the Clarett (see clarettAudioReconcile above).
+  # BOOT half: run once shortly after login, ordered after the audio services, to
+  # catch a boot where the Clarett was present but EE still mis-picked its input
+  # (PipeWire node creation lagging EE's startup) — a case no later USB event
+  # would fire for. No-ops when EE is already on the Clarett.
+  systemd.user.services.clarett-audio-reconcile = {
+    description = "Reconcile EasyEffects input onto the Clarett (once at login)";
+    wantedBy = [ "graphical-session.target" ];
+    partOf = [ "graphical-session.target" ];
+    after = [
+      "graphical-session.target"
+      "pipewire.service"
+      "wireplumber.service"
+      "easyeffects.service"
+      "gsr-mic-boost.service"
+      "gsr-replay.service"
+    ];
+    wants = [ "easyeffects.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${clarettAudioReconcile}";
+    };
+  };
+
+  # HOT-PLUG half: the udev rule (services.udev.extraRules below) starts this
+  # whenever the Clarett+ 8Pre USB device appears — powered on after the PC, or a
+  # late/repeat enumeration. This is the fix for the reported symptom ("turn the
+  # interface on while the PC is already running"). Runs the SAME reconcile as
+  # user `gustav`; the script only needs XDG_RUNTIME_DIR (which it sets) to reach
+  # the user PipeWire graph and `systemctl --user`.
+  systemd.services.clarett-audio-reconcile = {
+    description = "Reconcile EasyEffects input onto the Clarett (on USB hot-plug)";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "gustav";
+      ExecStart = "${clarettAudioReconcile}";
+      # The script polls up to ~30s for the capture node plus EE startup.
+      TimeoutStartSec = 120;
+    };
+  };
+
   # Autostart RustDesk's background service on login so the machine accepts
   # incoming remote-desktop connections without anyone opening the app. RustDesk
   # is normally driven by a privileged `--service` worker that does the screen
@@ -546,11 +699,14 @@ in
           };
         }
         {
-          # Webcam mic: last-resort only, never the auto-selected default.
+          # Webcam mic: last-resort fallback only — well below the Clarett (2000)
+          # so it never wins while the interface is on, but above gsr_mic_boost
+          # (0) so that when the Clarett is absent EasyEffects falls back to this
+          # real mic instead of looping through the boost.
           matches = [
             { "node.name" = "alsa_input.usb-046d_0825_C2C53110-02.mono-fallback"; }
           ];
-          actions.update-props."priority.session" = 0;
+          actions.update-props."priority.session" = 20;
         }
       ];
     };
@@ -627,6 +783,12 @@ in
   # state onto every scroll-lock LED (Logitech + Apple keyboards).
   services.udev.extraRules = ''
     ACTION=="add", SUBSYSTEM=="leds", KERNEL=="*::scrolllock", ATTR{trigger}="none", RUN+="${pkgs.coreutils}/bin/chgrp users /sys/class/leds/%k/brightness", RUN+="${pkgs.coreutils}/bin/chmod g+w /sys/class/leds/%k/brightness"
+
+    # When the Focusrite Clarett+ 8Pre (1235:820c) appears on USB — powered on
+    # after the PC, or a late/repeat enumeration — start the reconcile service
+    # that relinks EasyEffects' input onto it (see clarettAudioReconcile). Matches
+    # the usb_device (not each interface) so it fires once per appearance.
+    ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1235", ATTR{idProduct}=="820c", TAG+="systemd", ENV{SYSTEMD_WANTS}+="clarett-audio-reconcile.service"
   '';
   # -------------------------------------------------------------------------
   # For more information, see `man configuration.nix` or https://nixos.org/manual/nixos/stable/options#opt-system.stateVersion .

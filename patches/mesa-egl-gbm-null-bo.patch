@@ -1,0 +1,53 @@
+From: Michel Dänzer <mdaenzer@redhat.com>
+Subject: [PATCH] egl/gbm: Ignore buffers with no BO for destroying excess BOs
+
+Backport of upstream commit 962fd789c82add4ec71e182ec9cd8f6245689d9c,
+adapted to the pre-refactor form of this code in mesa 26.1.2 (upstream
+applies on top of the `struct dri2_egl_buffer *buffer` cleanups in
+5fdaab9ef802 / a668971bb5c7, which are not in 26.1.2).
+
+destroy_oldest_unused_bo() could pick a colour buffer whose ->bo is NULL
+and then call gbm_bo_destroy(NULL), which dereferences its argument
+unconditionally -> SIGSEGV in the compositor.
+
+Fixes: dd7ae4109189 ("egl/gbm: Destroy excess BOs")
+
+The final NULL check on oldest_buffer is NOT from upstream; upstream
+still dereferences it unconditionally. It is kept here because every
+candidate can be skipped by the loop above (all locked / back / current),
+which leaves oldest_buffer NULL.
+
+--- a/src/egl/drivers/dri2/platform_drm.c
++++ b/src/egl/drivers/dri2/platform_drm.c
+@@ -223,7 +223,8 @@
+    struct dri2_egl_buffer *oldest_buffer = NULL;
+ 
+    for (unsigned i = 0; i < ARRAY_SIZE(dri2_surf->color_buffers); i++) {
+-      if (dri2_surf->color_buffers[i].locked ||
++      if (!dri2_surf->color_buffers[i].bo ||
++          dri2_surf->color_buffers[i].locked ||
+           dri2_surf->back == &dri2_surf->color_buffers[i] ||
+           dri2_surf->current == &dri2_surf->color_buffers[i])
+          continue;
+@@ -234,6 +235,11 @@
+       }
+    }
+ 
++   if (!oldest_buffer) {
++      dri2_surf->excess_bo_frames = 0;
++      return;
++   }
++
+    gbm_bo_destroy(oldest_buffer->bo);
+    oldest_buffer->bo = NULL;
+    oldest_buffer->age = 0;
+@@ -254,7 +260,8 @@
+          if (!dri2_surf->color_buffers[i].locked) {
+             int age = dri2_surf->color_buffers[i].age;
+ 
+-            if (!min_age || age < min_age)
++            if (dri2_surf->color_buffers[i].bo &&
++                (!min_age || age < min_age))
+                min_age = age;
+ 
+             if (!max_age || age > max_age) {

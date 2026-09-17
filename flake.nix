@@ -68,6 +68,7 @@
           modules = [
             ./hosts/aggepc/configuration.nix
             ./modules/linker.nix
+            ./modules/mesa-egl-gbm-fix.nix
             ./modules/mouse.nix
 
             # Claude desktop app. Cowork's sandbox VM needs /dev/kvm, hence kvmUsers.
