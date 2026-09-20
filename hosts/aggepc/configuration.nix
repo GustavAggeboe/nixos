@@ -419,6 +419,7 @@ in
 
     ffmpeg  # CLI audio/video transcoding and processing
     spek  # Spectrogram viewer — inspect an audio file's frequency content over time
+    kdePackages.kdenlive  # Video editor — trim/cut the replay clips saved above
   ];
 
   # Install gpu-screen-recorder via its NixOS module rather than just dropping
