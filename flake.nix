@@ -98,7 +98,6 @@
           mapHosts {
             aggepc = {
               modules = [
-                ./modules/mesa-egl-gbm-fix.nix
                 ./modules/mouse.nix
 
                 # Claude desktop app. Cowork's sandbox VM needs /dev/kvm,
