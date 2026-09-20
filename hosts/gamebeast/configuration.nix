@@ -1,22 +1,27 @@
 {
   pkgs,
+  native,
   lib,
   swaglib,
   config,
   ...
 }:
-let
-  inherit (builtins)
-    attrValues
-    mapAttrs
-    match
-    tryEval
-    ;
-
-  optimizeForNative = swaglib.optimizeForNative pkgs "skylake";
-in
 {
   imports = [ ./hardware-configuration.nix ];
+
+  swag = {
+    cache.enable = true;
+    # linker.enable = true;
+  };
+
+  programs.obs-studio = {
+    enable = true;
+    package = pkgs.obs-studio.override { cudaSupport = true; };
+    plugins = with pkgs; [
+      obs-studio-plugins.obs-pipewire-audio-capture
+      obs-studio-plugins.obs-vaapi
+    ];
+  };
 
   # Compile all packages locally.
   # nix.settings.substitute = false;
@@ -32,7 +37,7 @@ in
     # To find out the 'efiDeviceHandle' value for 'windows', boot into this and
     # run 'map -c'. Run 'ls <device>:\EFI' per handle to look for the
     # 'Microsoft' directory. Use this handle for Windows.
-    edk2-uefi-shell.enable = true;
+    # systemd-boot.edk2-uefi-shell.enable = true;
     systemd-boot = {
       enable = true;
       windows = {
@@ -52,28 +57,19 @@ in
   # networking.wireless.enable = true;
 
   # ZFS.
-  boot.zfs.forceImportRoot = false;
+  boot.zfs = {
+    package = native.zfs;
+    forceImportRoot = false;
+  };
   services.zfs.autoScrub.enable = true;
   networking.hostId = "8425e349";
 
   # Use latest kernel compatible with ZFS.
-  boot.kernelPackages = pkgs.linuxPackagesFor (
+  boot.kernelPackages =
     let
-      zfsCompatibleKernelPackages = lib.filterAttrs (
-        name: kernelPackages:
-        (match "linux_[0-9]+_[0-9]+" name) != null
-        && (tryEval kernelPackages).success
-        && (!kernelPackages.${config.boot.zfs.package.kernelModuleAttribute}.meta.broken)
-      ) pkgs.linuxKernel.packages;
+      zfsKernelPackages = swaglib.latestZfsCompatible { inherit pkgs config; };
 
-      latestKernelPackage = lib.last (
-        lib.sort (a: b: (lib.versionOlder a.kernel.version b.kernel.version)) (
-          attrValues zfsCompatibleKernelPackages
-        )
-      );
-    in
-    optimizeForNative (
-      latestKernelPackage.kernel.override {
+      customKernel = zfsKernelPackages.kernel.override {
         # Check current config with 'zcat /proc/config.gz'.
         ignoreConfigErrors = true;
         structuredExtraConfig =
@@ -87,55 +83,67 @@ in
             # Build AMDGPU into the kernel, instead of loading as module.
             DRM = yes;
             DRM_KMS_HELPER = yes;
+            DRM_NOUVEAU = yes;
+            FB_NVIDIA = yes;
             DRM_TTM = yes;
-            DRM_AMDGPU = yes;
             FB = yes;
 
             # Disable graphics from other vendors.
             DRM_XE = no;
+            DRM_AMDGPU = no;
             DRM_RADEON = no;
-            DRM_NOUVEAU = no;
             DRM_ADP = no;
             DRM_MGAG200 = no;
             DRM_AST = no;
-            FB_NVIDIA = no;
 
             # Disable industrial IO drivers.
             IIO = no;
           };
-      }
-    )
-  );
+      };
+    in
+    zfsKernelPackages;
 
-  nixpkgs.overlays = [
-    # Building GNOME stuff with native optimizations.
-    (
-      final: prev:
-      let
-        # Only using native GTK4 and GJS for some derivations, too many packages
-        # need to be compiled if these are native in general.
-        native = {
-          gtk4 = optimizeForNative prev.gtk4;
-          gjs = optimizeForNative prev.gjs;
-        };
-      in
-      mapAttrs (name: value: optimizeForNative value) {
-        inherit (prev) gnome-desktop ripgrep;
-
-        gnome-session = prev.gnome-session.override {
-          inherit (final) gnome-desktop;
-        };
-        mutter = prev.mutter.override {
-          inherit (native) gtk4;
-          inherit (final) gnome-desktop;
-        };
-        gnome-shell = prev.gnome-shell.override {
-          inherit (native) gtk4 gjs;
-          inherit (final) mutter gnome-desktop;
+  system.replaceDependencies.replacements =
+    let
+      native-mutter = native.mutter.override {
+        inherit (native) gtk4 gnome-desktop;
+      };
+    in
+    [
+      {
+        original = pkgs.gnome-session;
+        replacement = native.gnome-session.override {
+          inherit (native) gnome-desktop;
         };
       }
-    )
-  ];
+      {
+        original = pkgs.mutter;
+        replacement = native-mutter;
+      }
+      {
+        original = pkgs.gnome-shell;
+        replacement = native.gnome-shell.override {
+          inherit (native) gtk4 gjs gnome-desktop;
+          mutter = native-mutter;
+        };
+      }
+    ]
+    ++
+      map
+        (name: value: {
+          original = pkgs.${name};
+          replacement = native.${name};
+        })
+        (
+          builtins.attrNames {
+            inherit (pkgs)
+              gnome-desktop
+              libdrm
+              libgbm
+              vulkan-loader
+              ;
+          }
+        );
 
   # Configure network proxy if necessary
   # networking.proxy.default = "http://user:password@proxy:port/";
@@ -151,6 +159,9 @@ in
     gnome.enable = true;
     # cosmic.enable = true;
   };
+
+  services.auto-cpufreq.enable = true;
+  services.power-profiles-daemon.enable = false;
 
   # Set your time zone.
   time.timeZone = "Europe/Copenhagen";
@@ -171,12 +182,13 @@ in
   };
 
   # Enable the X11 windowing system.
+  hardware.nvidia = {
+    open = true;
+    modesetting.enable = true;
+  };
   services.xserver = {
     enable = true;
-    videoDrivers = [
-      "amdgpu"
-      "modesetting"
-    ];
+    videoDrivers = [ "nvidia" ];
   };
 
   services.libinput.enable = true;
@@ -186,9 +198,7 @@ in
     enable = true;
     extraPackages = with pkgs; [
       intel-media-driver
-      vulkan-loader
-      vulkan-validation-layers
-      vulkan-extension-layer
+      nvidia-vaapi-driver
     ];
     enable32Bit = true;
     extraPackages32 = with pkgs.pkgsi686Linux; [
@@ -206,6 +216,7 @@ in
   environment.systemPackages = with pkgs; [
     libvirt
     freetype
+    native.ripgrep
     # rocmPackages.rocm-smi # AMD GPU Monitoring
   ];
 
@@ -226,13 +237,7 @@ in
   # Enable sound with pipewire.
   security.rtkit.enable = true;
   services.pulseaudio.enable = false;
-  services.pipewire = {
-    enable = true;
-    # pulse.enable = true;
-
-    # If you want to use JACK applications, uncomment this
-    #jack.enable = true;
-  };
+  services.pipewire.enable = true;
   programs.dconf.enable = true;
 
   # Define a user account. Don't forget to set a password with ‘passwd’.
@@ -269,10 +274,11 @@ in
     };
   };
 
-  boot.zswap.enable = true;
+  # zramSwap.enable = true;
 
   # Install firefox.
   programs.firefox.enable = true;
+  programs.firefox.package = pkgs.firefox-esr;
 
   # Some programs need SUID wrappers, can be configured further or are started
   # in user sessions.
@@ -282,9 +288,7 @@ in
   #   enableSSHSupport = true;
   # };
 
-  programs.steam = {
-    localNetworkGameTransfers.openFirewall = true;
-  };
+  programs.steam.localNetworkGameTransfers.openFirewall = true;
 
   # List services that you want to enable:
   programs.virt-manager = {
@@ -304,6 +308,17 @@ in
     spiceUSBRedirection.enable = true;
   };
 
+  programs.ssh = {
+    extraConfig = ''
+      Host builder
+        HostName builder
+        ProxyJump hypervisor
+
+      Host files
+        HostName hypervisor
+    '';
+  };
+
   # Enable the OpenSSH daemon.
   # services.openssh.enable = true;
   services.dbus.enable = true;
@@ -316,8 +331,6 @@ in
       settings.main.capslock = "esc";
     };
   };
-
-  services.mullvad-vpn.enable = true;
 
   # Flatpak and flathub, and adw-gtk3 theme for flatpaks.
   services.flatpak.enable = true;
@@ -352,29 +365,21 @@ in
   # (e.g. man configuration.nix or on https://nixos.org/nixos/options.html).
   system.stateVersion = "24.04"; # Did you read the comment?
 
-  # Needed for findings graphics card on boot.
-  boot.initrd.kernelModules = [ "amdgpu" ];
-
-  # A bunch of cool kernel parameters to make AMD R290 cooperate.
   boot.blacklistedKernelModules = [ "radeon" ];
+
+  # Sleep fixes.
   boot.kernelParams = [
-    "radeon.cik_support=0"
-    "radeon.si_support=0"
-    "amdgpu.cik_support=1"
-    "amdgpu.si_support=1"
-    "amdgpu.dc=1"
-
-    "intel_iommu=on"
-    "amd_iommu=on"
-    "iommu=pt"
-    "vfio-pci.ids=1002:aac8"
-
-    # Sleep fixes.
-    "nohibernate"
-    # "mem_sleep_default=deep"
-    "acpi_sleep=nonvs"
-    "pci=noaer"
+    "mem_sleep_default=deep"
+    "pcie_port_pm=off"
   ];
+
+  # WiFi card fixes.
+  boot.extraModprobeConfig = ''
+    options iwlwifi power_save=0
+    options iwlmvm power_scheme=1
+    options iwlwifi d0i3_disable=1
+    options iwlwifi uapsd_disable=1
+  '';
 
   # Enables DHCP on each ethernet and wireless interface. In case of scripted networking
   # (the default) this is the recommended approach. When using systemd-networkd it's

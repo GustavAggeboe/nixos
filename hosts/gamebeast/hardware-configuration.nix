@@ -25,6 +25,7 @@
   boot.initrd.kernelModules = [ ];
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
+  boot.kernelParams = [ "pcie_aspm=off" ];
 
   swapDevices = [
     {
@@ -42,7 +43,10 @@
   fileSystems."/nix" = {
     device = "zpool/nix";
     fsType = "zfs";
-    options = [ "zfsutil" ];
+    options = [
+      "zfsutil"
+      "noatime"
+    ];
   };
 
   fileSystems."/var" = {
@@ -72,19 +76,20 @@
     fsType = "ntfs3";
     options = [
       "rw"
-      "nosuid"
-      "nodev"
-      "nofail"
-      "relatime"
-      "uid=1000"
-      "gid=100"
-      "iocharset=utf8"
-      "uhelper=udisks2"
+      # "nosuid"
+      # "nodev"
+      # "nofail"
+      # "relatime"
+      # "uid=1000"
+      # "gid=100"
+      # "iocharset=utf8"
+      # "uhelper=udisks2"
       "x-gvfs-hide" # Hide unmount button, don't want that happening.
     ];
     neededForBoot = false;
   };
 
+  swag.native.march = "skylake";
   nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
   hardware.cpu.intel.updateMicrocode = lib.mkDefault config.hardware.enableRedistributableFirmware;
 }

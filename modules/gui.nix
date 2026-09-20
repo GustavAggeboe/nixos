@@ -109,7 +109,7 @@ in
   };
 
   environment.variables = {
-    GNOME_SHELL_SLOWDOWN_FACTOR = "0.75";
+    GNOME_SHELL_SLOWDOWN_FACTOR = "0.80";
     COLORTERM = "truecolor";
     TERM = "xterm-256color";
   };
@@ -173,6 +173,11 @@ in
   environment.sessionVariables.GST_PLUGIN_SYSTEM_PATH_1_0 =
     lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0"
       gstreamerPackages;
+
+  services.mullvad-vpn = {
+    enable = true;
+    gui.enable = true;
+  };
 
   programs.bash.shellAliases = shellAliases;
 

@@ -19,6 +19,14 @@ in
     ./hardware-configuration.nix
   ];
 
+  # swag = {
+  #   ssh-server.enable = true;
+  #   cache = {
+  #     enable = true;
+  #     mode = "host";
+  #   };
+  # };
+
   # Bootloader.
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
@@ -26,7 +34,7 @@ in
   # Kernel.
   boot.kernelPackages = pkgs.linuxPackagesFor (
     optimizeForNative (
-      pkgs.linuxPackages_7_0.kernel.override {
+      pkgs.linuxPackages_7_1.kernel.override {
         # Check current config with 'zcat /proc/config.gz'.
         ignoreConfigErrors = true;
         structuredExtraConfig =

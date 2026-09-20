@@ -1,7 +1,12 @@
 {
-  description = "My cool system flake!";
+  description = "Home of my configuration files.";
+
   inputs = {
-    nixpkgs.url = "nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    lanzaboote = {
+      url = "github:nix-community/lanzaboote/v1.1.0";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     hytale-flake = {
       url = "github:swagtop/hytale-flake";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -21,125 +26,119 @@
     inputs@{
       self,
       nixpkgs,
+      lanzaboote,
       hytale-flake,
       ...
     }:
     let
-      inherit (builtins) foldl';
-      inherit (inputs.nixpkgs.lib) genAttrs;
-      mkSystem =
-        config:
-        nixpkgs.lib.nixosSystem (
-          config
-          // {
-            specialArgs = {
-              inherit self inputs;
-              swaglib = import ./swaglib.nix;
-            }
-            // (config.specialArgs or { });
-            modules = [
-              ./modules/common.nix
-              ./modules/nixos.nix
-            ]
-            ++ (config.modules or [ ]);
-          }
-        );
+      inherit (builtins)
+        foldl'
+        path
+        ;
+
+      inherit (nixpkgs.lib)
+        mapAttrs
+        mapAttrs'
+        readDir
+        removeSuffix
+        ;
+
+      swaglib = import ./lib.nix;
+
+      inherit (swaglib)
+        importDirectory
+        ;
+
+      patches = mapAttrs' (name: value: {
+        name = removeSuffix ".patch" name;
+        value = path {
+          inherit name;
+          path = ./patches/${name};
+        };
+      }) (readDir ./patches);
+
+      perSystem =
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+          };
+        in
+        {
+          packages = import ./packages (pkgs // { inherit patches swaglib; });
+          formatter = pkgs.nixfmt-tree;
+        };
+
+      flake = {
+        nixosConfigurations =
+          let
+            mapHosts = mapAttrs (
+              name: host:
+              nixpkgs.lib.nixosSystem (
+                host
+                // {
+                  specialArgs = host.specialArgs or { } // {
+                    inherit
+                      inputs
+                      patches
+                      self
+                      swaglib
+                      ;
+                  };
+
+                  modules = host.modules or [ ] ++ [
+                    ./hosts/${name}/configuration.nix
+                    (importDirectory { dir = ./modules/core; })
+                  ];
+                }
+              )
+            );
+          in
+          mapHosts {
+            aggepc = {
+              modules = [
+                ./modules/mesa-egl-gbm-fix.nix
+                ./modules/mouse.nix
+
+                # Claude desktop app. Cowork's sandbox VM needs /dev/kvm,
+                # hence kvmUsers.
+                inputs.claude-desktop.nixosModules.default
+                {
+                  programs.claude-desktop = {
+                    enable = true;
+                    cowork.kvmUsers = [ "gustav" ];
+                  };
+                }
+              ];
+            };
+            gamebeast = {
+              modules = [
+                ./modules/dev.nix
+                ./modules/gaming.nix
+                ./modules/gui.nix
+                ./modules/music.nix
+                ./modules/office.nix
+                hytale-flake.nixosModules.hytale-launcher
+              ];
+            };
+            duster = {
+              modules = [
+                ./modules/dev.nix
+                ./modules/gui.nix
+                lanzaboote.nixosModules.lanzaboote
+              ];
+            };
+            files = { };
+            builder = { };
+          };
+      };
     in
     foldl' (
-      accumulator: system:
+      acc: system:
       let
-        pkgs = import nixpkgs {
-          inherit system;
-          config.allowUnfree = true;
-        };
-        step = {
-          packages.${system} = import ./swagpkgs.nix pkgs;
-          formatter.${system} = pkgs.nixfmt-tree;
-        };
+        mergeSystem = name: value: acc.${name} or { } // { ${system} = value; };
       in
-      accumulator
-      // genAttrs [ "packages" "devShells" "formatter" ] (
-        attribute: accumulator.${attribute} or { } // step.${attribute} or { }
-      )
-    ) { } inputs.nixpkgs.lib.systems.flakeExposed
-    // {
-      nixosConfigurations = {
-        aggepc = mkSystem {
-          modules = [
-            ./hosts/aggepc/configuration.nix
-            ./modules/linker.nix
-            ./modules/mesa-egl-gbm-fix.nix
-            ./modules/mouse.nix
-
-            # Claude desktop app. Cowork's sandbox VM needs /dev/kvm, hence kvmUsers.
-            inputs.claude-desktop.nixosModules.default
-            {
-              programs.claude-desktop = {
-                enable = true;
-                cowork.kvmUsers = [ "gustav" ];
-              };
-            }
-          ];
-        };
-        
-        gamebeast = mkSystem {
-          modules = [
-            ./hosts/gamebeast/configuration.nix
-
-            ./modules/dev.nix
-            ./modules/gaming.nix
-            ./modules/gui.nix
-            ./modules/music.nix
-            ./modules/tui.nix
-
-            ./modules/office.nix
-
-            (
-              { pkgs, ... }:
-              {
-                environment.systemPackages = [ hytale-flake.packages.${pkgs.stdenv.hostPlatform.system}.default ];
-              }
-            )
-
-            # ./modules/linker.nix
-            ./modules/use-cache.nix
-          ];
-        };
-        swagtop = mkSystem {
-          modules = [
-            ./hosts/swagtop/configuration.nix
-
-            ./modules/dev.nix
-            ./modules/gui.nix
-            ./modules/tui.nix
-
-            ./modules/linker.nix
-            ./modules/use-cache.nix
-          ];
-        };
-        servtop = mkSystem {
-          modules = [
-            ./hosts/servtop/configuration.nix
-
-            ./modules/dev.nix
-            ./modules/ssh-server.nix
-            ./modules/tui.nix
-
-            ./modules/host-cache.nix
-          ];
-        };
-        cooltop = mkSystem {
-          modules = [
-            ./hosts/cooltop/configuration.nix
-
-            ./modules/gui.nix
-            ./modules/dev.nix
-            ./modules/tui.nix
-
-            ./modules/linker.nix
-            ./modules/use-cache.nix
-          ];
-        };
-      };
-    };
+      acc // mapAttrs mergeSystem (perSystem system)
+    ) flake nixpkgs.lib.systems.flakeExposed;
 }

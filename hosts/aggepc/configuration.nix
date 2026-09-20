@@ -284,6 +284,24 @@ in
       ./hardware-configuration.nix
     ];
 
+  # Opt into upstream's swag linker. This replaces the old top-level
+  # `./modules/linker.nix` import: the module now lives in modules/core, is
+  # imported into every host by the flake, and is gated behind this option.
+  swag.linker.enable = true;
+
+  # direnv is enabled by modules/core/default-nixos.nix. Override it here
+  # rather than editing that shared module, so upstream merges stay clean.
+  programs.direnv.enable = lib.mkForce false;
+
+  programs.bash = {
+    # modules/core/default-nixos.nix defines the `ns`, `realwhich` and `godrv`
+    # helpers in `promptInit`, which bash only sources for interactive prompts.
+    # Re-source the same text from `shellInit` so they are available in
+    # non-interactive shells (scripts, `bash -c`, systemd units) too. Reading
+    # the option back keeps this in step with any upstream edits to promptInit.
+    shellInit = config.programs.bash.promptInit;
+  };
+
   # Use the systemd-boot EFI boot loader.
   boot.loader = {
     # Wait indefinitely at the menu for a manual selection instead of
@@ -388,7 +406,7 @@ in
     alsa-scarlett-gui
     easyeffects  # Audio effects (input noise suppression via RNNoise; tune in GUI)
     discord
-    google-chrome  # Google Chrome (unfree; allowUnfree is set in modules/nixos.nix)
+    google-chrome  # Google Chrome (unfree; allowUnfree is set in modules/core/default-nixos.nix)
     rustdesk-wayland  # Remote desktop client (pipewire gst plugin added for Wayland)
     jetbrains.idea  # IntelliJ IDEA Ultimate (swap to .idea-community for the free edition)
     nodejs  # provides node, npm and npx
