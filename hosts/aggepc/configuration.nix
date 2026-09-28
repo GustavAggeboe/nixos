@@ -952,6 +952,99 @@ in
     MemoryMax = "24G";
   };
 
+  # -------------------------------------------------------------------------
+  # --- Desktop session OOM protection --------------------------------------
+  # 2026-09-28 15:11: `npm test` in voice-ai-clone-data-collection spawned 24
+  # vitest workers (one per core), each holding its own in-memory PGlite at
+  # 0.6-1.2 GB, for 16.4 GB of a 23.4 GB global OOM. The kernel killed
+  # gnome-shell, Claude Desktop, chrome, firefox and steamwebhelper;
+  # gnome-shell came back up at 15:11:25, i.e. the session dropped and
+  # relogged. Same shape as the nix build above - a runaway user process, and
+  # the desktop is what pays for it.
+  #
+  # That repo now caps vitest at 6 workers, but nothing stopped *any* user
+  # process from exhausting the box, so the guarantee belongs here. Three
+  # layers:
+  #
+  # 1. app.slice gets a hard ceiling. Graphical apps and everything they
+  #    spawn are accounted to the user manager's app.slice - including these
+  #    test runs, because Claude Desktop parents the Claude Code sessions, so
+  #    their children land in its scope. A MemoryMax there turns exhaustion
+  #    into a *cgroup* OOM, which can only kill a process inside app.slice,
+  #    never the compositor over in session.slice. MemoryHigh throttles and
+  #    reclaims first, so the ordinary outcome is a test run that slows down
+  #    rather than a dead app. 24 GiB of 31.2 GiB leaves ~7 GiB for the
+  #    session, system.slice, the kernel and page cache.
+  #
+  # 2. session.slice gets a reclaim reservation, so the compositor stays
+  #    resident and responsive while app.slice is being squeezed. memory.min
+  #    is capped by every ancestor's memory.min, so the 1 GiB has to be
+  #    granted at each level (user.slice -> user-*.slice -> user@.service ->
+  #    session.slice) or the effective protection is silently 0.
+  #
+  # 3. systemd-oomd is switched on for the user slices. It was already
+  #    enabled and running, but every cgroup sat at
+  #    ManagedOOMMemoryPressure=auto, which inherits "off" - so it monitored
+  #    nothing and the kernel's own killer fired instead. oomd acts on PSI
+  #    stall time before memory is actually gone and picks the cgroup causing
+  #    the pressure; session.slice is marked "omit" so the desktop can never
+  #    be the victim it chooses.
+  #
+  # Residual overlap worth knowing: app.slice (24 GiB) and nix-daemon
+  # (24 GiB, above) can still sum to more than RAM if a large build and heavy
+  # app use collide. Each still hits its own cgroup OOM first, and oomd is
+  # the backstop for that cross-slice case; tighten these numbers if it ever
+  # actually happens.
+  systemd.oomd = {
+    enable = true;
+    enableUserSlices = true;
+  };
+
+  # Layer 2: the memory.min chain down to the compositor.
+  systemd.slices.user.sliceConfig = {
+    MemoryAccounting = true;
+    MemoryMin = "1G";
+  };
+
+  # user-1000.slice is created dynamically per UID; systemd applies
+  # user-.slice.d drop-ins to every instance.
+  systemd.slices."user-" = {
+    overrideStrategy = "asDropin";
+    sliceConfig = {
+      MemoryAccounting = true;
+      MemoryMin = "1G";
+    };
+  };
+
+  systemd.services."user@".serviceConfig = {
+    MemoryAccounting = true;
+    MemoryMin = "1G";
+  };
+
+  systemd.user.slices = {
+    # Layer 1: the ceiling that keeps runaway apps off the rest of the box.
+    app = {
+      overrideStrategy = "asDropin";
+      sliceConfig = {
+        MemoryAccounting = true;
+        MemoryHigh = "20G";
+        MemoryMax = "24G";
+        # A capped cgroup can still swap freely: the 200M-capped test scope used
+        # to verify this pushed 3.7 GB into a 4 GB swap before it was killed.
+        # Bound it so the session always has swap headroom of its own.
+        MemorySwapMax = "2G";
+      };
+    };
+    session = {
+      overrideStrategy = "asDropin";
+      sliceConfig = {
+        MemoryAccounting = true;
+        MemoryMin = "1G";
+        ManagedOOMPreference = "omit";
+      };
+    };
+  };
+
   # For more information, see `man configuration.nix` or https://nixos.org/manual/nixos/stable/options#opt-system.stateVersion .
   system.stateVersion = "26.05"; # Did you read the comment?
 
