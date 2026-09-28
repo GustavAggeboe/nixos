@@ -268,13 +268,35 @@ let
   # already-built binary to add pipewire's gstreamer-1.0 dir to the plugin
   # path; the .desktop launcher uses `Exec=rustdesk` (PATH), so this also
   # applies when launched from the GNOME app grid.
+  #
+  # The same wrapper also forces the *client* GUI onto XWayland. RustDesk's
+  # sciter UI is X11-only in two places that both break under a native Wayland
+  # window, and both bite only the remote-session window, not the main one:
+  #   - Keyboard: with `keyboard_mode = 'map'` (the default, per-peer in
+  #     ~/.config/rustdesk/peers/*.toml) every keystroke is captured by
+  #     rdev's grab loop, which is XOpenDisplay/XGrabKeyboard/XRecord. A
+  #     Wayland surface never delivers keys to XWayland, so the grab logs look
+  #     healthy (src/keyboard.rs "[grab] Run ... mode=map") while forwarding
+  #     nothing — the remote desktop simply ignores typing.
+  #   - Window move: ui/remote.html is `window-frame="extended"`, so sciter
+  #     draws its own caption and repositions the window itself. Wayland does
+  #     not let a client position its own window, so dragging that top bar is
+  #     a no-op.
+  # Running the client under XWayland fixes both. `--service`/`--server` are
+  # excluded so the *host* side keeps its native Wayland + PipeWire capture
+  # path untouched; rustdesk detects wayland from WAYLAND_DISPLAY and
+  # XDG_SESSION_TYPE, never GDK_BACKEND, so this does not confuse that either.
   rustdesk-wayland = pkgs.symlinkJoin {
     name = "rustdesk-wayland-${pkgs.rustdesk.version}";
     paths = [ pkgs.rustdesk ];
     nativeBuildInputs = [ pkgs.makeWrapper ];
     postBuild = ''
       wrapProgram $out/bin/rustdesk \
-        --prefix GST_PLUGIN_SYSTEM_PATH_1_0 ':' "${pkgs.pipewire}/lib/gstreamer-1.0"
+        --prefix GST_PLUGIN_SYSTEM_PATH_1_0 ':' "${pkgs.pipewire}/lib/gstreamer-1.0" \
+        --run 'case " $* " in
+                 *" --service "*|*" --server "*) ;;
+                 *) export GDK_BACKEND=x11 ;;
+               esac'
     '';
   };
 in
@@ -304,9 +326,9 @@ in
 
   # Use the systemd-boot EFI boot loader.
   boot.loader = {
-    # Wait indefinitely at the menu for a manual selection instead of
-    # counting down and auto-booting the default entry.
-    timeout = null;
+    # Show the menu for 20 seconds, then auto-boot the default entry if
+    # nothing was selected.
+    timeout = 20;
     efi.canTouchEfiVariables = true;
     systemd-boot = {
       # To find out the 'efiDeviceHandle' value for 'windows', boot into this and
@@ -405,6 +427,43 @@ in
     gh
     alsa-scarlett-gui
     easyeffects  # Audio effects (input noise suppression via RNNoise; tune in GUI)
+
+    # Tidal desktop client. Tidal's own desktop app isn't packaged for Linux
+    # (`pkgs.tidal` is the macOS build, aarch64-darwin only), so this is the
+    # community Electron wrapper around Tidal's web player. It builds against
+    # castlabs-electron (Electron + Widevine) so DRM playback works; that's
+    # unfree-redistributable, hence not on cache.nixos.org — it builds locally
+    # the first time, then comes from cache.spirre.vip like everything else.
+    #
+    # --disable-dev-shm-usage is required here, otherwise every renderer
+    # process dies at startup and the window just shows a blank grey content
+    # area (menu bar and title bar still work, since those belong to the main
+    # process). The renderer aborts with:
+    #   Creating shared memory in /dev/shm/.org.chromium.Chromium.XXXXXX
+    #     failed: No such process (3)
+    #   FATAL: ... frequently caused by incorrect permissions on /dev/shm
+    # The message is misleading: /dev/shm on this host is a healthy 16G tmpfs,
+    # mode 1777, rw,nosuid,nodev (no noexec), and ordinary writes to it succeed.
+    # ESRCH from access()/shm creation is not a permissions failure, and other
+    # Electron apps here (e.g. claude-desktop) use /dev/shm fine — it is
+    # specific to this app's castlabs-electron build. The flag makes Chromium
+    # put its shared memory under /tmp instead, which avoids the abort. Slight
+    # IPC overhead, no functional difference.
+    #
+    # Wrapped with symlinkJoin rather than overrideAttrs so adding the flag
+    # doesn't trigger a full rebuild of the Electron app. The .desktop entry
+    # ships Exec=tidal-hifi (resolved via PATH), so the GNOME launcher picks up
+    # this wrapper too, not just the shell.
+    (symlinkJoin {
+      name = "tidal-hifi-wrapped";
+      paths = [ tidal-hifi ];
+      nativeBuildInputs = [ makeWrapper ];
+      postBuild = ''
+        wrapProgram $out/bin/tidal-hifi --add-flags "--disable-dev-shm-usage"
+      '';
+      inherit (tidal-hifi) meta;
+    })
+
     discord
     google-chrome  # Google Chrome (unfree; allowUnfree is set in modules/core/default-nixos.nix)
     rustdesk-wayland  # Remote desktop client (pipewire gst plugin added for Wayland)
@@ -438,6 +497,20 @@ in
     ffmpeg  # CLI audio/video transcoding and processing
     spek  # Spectrogram viewer — inspect an audio file's frequency content over time
     kdePackages.kdenlive  # Video editor — trim/cut the replay clips saved above
+
+    # AirVPN's official client ("Eddie"): connects over OpenVPN or WireGuard
+    # and provides Network Lock, its kill switch. Log in with your AirVPN
+    # account on first launch — nothing account-specific lives in this repo.
+    #
+    # The GUI itself runs unprivileged and hands the privileged work (making the
+    # tunnel interface, rewriting routes and DNS, netlock firewall rules) to a
+    # helper it launches through polkit. The package ships that polkit action
+    # pointing at its own store path, and NixOS picks it up because the polkit
+    # module links /share/polkit-1 into the system path — so installing the
+    # package here is all the wiring needed, and the helper then asks a wheel
+    # user for their password. Netlock uses the iptables backend (nft isn't in
+    # the system path, iptables is, via networking.firewall).
+    eddie
   ];
 
   # Install gpu-screen-recorder via its NixOS module rather than just dropping
@@ -600,34 +673,76 @@ in
     };
   };
 
-  # Autostart RustDesk's background service on login so the machine accepts
-  # incoming remote-desktop connections without anyone opening the app. RustDesk
-  # is normally driven by a privileged `--service` worker that does the screen
-  # capture, input injection and connection handling; the GUI/tray only talks to
-  # it over IPC and shows your ID/password. Run it as a *user* service inside the
-  # graphical session (not a root system service) so it can reach this Wayland
-  # session's screencast portal and PipeWire — a root daemon can't capture a
-  # Wayland session.
+  # RustDesk unattended access.
   #
-  # NOTE: this makes RustDesk *running and reachable* after login; to connect
-  # without anyone clicking "Accept" at the machine you still have to set a
-  # permanent password once: open RustDesk → Settings → Security → set a
-  # permanent password (and note the ID shown in the main window). On Wayland the
-  # very first incoming connection also pops the GNOME screen-share approval; once
-  # approved RustDesk stores a restore token and later connections are silent.
-  systemd.user.services.rustdesk = {
+  # Upstream's Linux layout is a *root* system service (`rustdesk --service`)
+  # that owns the uinput devices used to inject keyboard/mouse events and that
+  # spawns `rustdesk --server` inside whichever seat0 session is logged in
+  # (through `sudo -u`). That child is what registers with the rendezvous
+  # server, captures the screen and serves connections; it runs as the session's
+  # own user, so it keeps using ~/.config/rustdesk — same ID and same permanent
+  # password as before.
+  #
+  # Keeping that layout is also what stops GNOME's "Remote Desktop" approval
+  # dialog from coming back at every login. libs/scrap/src/wayland/pipewire.rs
+  # chooses its portal by grepping for a running `rustdesk --server` process:
+  #   found     -> ScreenCast portal with persist_mode = 2. GNOME returns a
+  #                restore_token, which RustDesk saves as `wayland-restore-token`
+  #                in RustDesk_local.toml and replays afterwards, so the dialog
+  #                appears exactly once, ever. Input skips the portal entirely
+  #                and goes through uinput.
+  #   not found -> RemoteDesktop portal, which upstream still marks "TODO:
+  #                support persist_mode for remote_desktop_portal" — no token is
+  #                ever issued, so GNOME re-asks once per session.
+  #
+  # This host ran `--service` as a *user* unit until 2026-09-25 and so never had
+  # a `--server`: run_as_user() shells out to `sudo`, which was absent from the
+  # unit's PATH, leaving it to loop on "Failed to start server: ENOENT" (and,
+  # being a user unit, it also started in the gdm-greeter's session and left
+  # /tmp/RustDesk-service owned by gdm, breaking the uinput IPC on top). The only
+  # thing serving connections was the GUI's in-process server — the RemoteDesktop
+  # path — hence the dialog every time nobody had pre-approved it.
+  #
+  # PATH here is load-bearing: the service needs `sudo` (/run/wrappers/bin) to
+  # enter the user session, and the `--server` child inherits this PATH and needs
+  # `ps` to recognise itself (is_server_running() runs `ps aux | grep`).
+  #
+  # Unchanged requirement for silent access: a permanent password, set once in
+  # RustDesk -> Settings -> Security.
+  systemd.services.rustdesk = {
     description = "RustDesk — remote desktop service (unattended access)";
-    wantedBy = [ "graphical-session.target" ];
-    partOf = [ "graphical-session.target" ];
-    after = [ "graphical-session.target" "pipewire.service" "wireplumber.service" ];
-    wants = [ "pipewire.service" "wireplumber.service" ];
+    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" "systemd-logind.service" ];
+    path = [
+      "/run/wrappers"  # sudo — hop into the logged-in user's session
+      pkgs.procps      # ps/pkill — server detection and cleanup
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.gawk
+      pkgs.findutils   # xargs
+    ];
+    # The `--server` child is re-exec'd from the unwrapped store binary through
+    # sudo, so it cannot inherit the GStreamer plugin path from the
+    # rustdesk-wayland wrapper defined above; set it here (and let sudo carry it
+    # through, see security.sudo.extraConfig) or pipewiresrc goes missing again.
+    environment.GST_PLUGIN_SYSTEM_PATH_1_0 = "${pkgs.pipewire}/lib/gstreamer-1.0";
     serviceConfig = {
       ExecStart = "${rustdesk-wayland}/bin/rustdesk --service";
-      # Portal/PipeWire may not be ready the instant the session starts; retry.
       Restart = "on-failure";
       RestartSec = 5;
     };
   };
+
+  # RustDesk injects remote keyboard/mouse events through /dev/uinput, so make
+  # sure the module is loaded at boot rather than relying on whatever happened
+  # to pull it in (it was loaded with zero users and no unit claiming it).
+  hardware.uinput.enable = true;
+
+  # Carry the GStreamer plugin path across the rustdesk service's `sudo -u` hop
+  # into the user session; sudo's env_reset would otherwise drop it.
+  security.sudo.extraConfig = ''
+    Defaults env_keep += "GST_PLUGIN_SYSTEM_PATH_1_0"
+  '';
 
   programs.firefox.enable = true;
   programs.steam = {
@@ -810,6 +925,33 @@ in
     ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1235", ATTR{idProduct}=="820c", TAG+="systemd", ENV{SYSTEMD_WANTS}+="clarett-audio-reconcile.service"
   '';
   # -------------------------------------------------------------------------
+  # --- Nix build resource limits -------------------------------------------
+  # 2026-09-22: a Python/ML devshell build (onnx, triton, ml-dtypes) ran 26
+  # concurrent cc1plus holding 26.5 GB; nix-daemon.service peaked at 27.6 GB
+  # + 3 GB swap on this 31 GiB box. The kernel OOM killer then ate the GNOME
+  # session rather than the build, because systemd gives user-session apps an
+  # oom_score_adj of 100-200 while nix build processes run at 0 - so the
+  # compilers were protected and the desktop died. Screen went black, forced
+  # relog, then a reboot. daemonCPUSchedPolicy/daemonIOSchedClass "idle"
+  # (modules/core/default-nixos.nix) protect interactivity, not memory, which
+  # is why they did not help here.
+  #
+  # max-jobs/cores cap the compiler count: the defaults (max-jobs = auto,
+  # cores = 0) permit 24 jobs x 24 cores on this machine. MemoryMax is the
+  # real safety net - builds are accounted to the nix-daemon.service cgroup
+  # (confirmed by its own shutdown accounting), so a runaway build now hits a
+  # cgroup OOM and fails by itself instead of taking the session down.
+  nix.settings = {
+    max-jobs = 4;
+    cores = 4;
+  };
+
+  systemd.services.nix-daemon.serviceConfig = {
+    MemoryAccounting = true;
+    MemoryHigh = "16G";
+    MemoryMax = "24G";
+  };
+
   # For more information, see `man configuration.nix` or https://nixos.org/manual/nixos/stable/options#opt-system.stateVersion .
   system.stateVersion = "26.05"; # Did you read the comment?
 
