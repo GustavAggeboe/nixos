@@ -362,6 +362,23 @@ in
     nssmdns4 = true;
   };
 
+  # Wake-on-LAN: let the Pi Zero (aggepi) power this machine up with a magic
+  # packet sent to d8:5e:d3:5b:fc:5b. This renders
+  # /etc/systemd/network/40-enp7s0.link with WakeOnLan=magic, applied by
+  # systemd-udevd when the interface appears. There is no systemd service to go
+  # looking for, and networkd is not involved -- NetworkManager still owns the
+  # link, but its 802-3-ethernet.wake-on-lan is "default", so it leaves the
+  # setting alone rather than fighting the .link file.
+  #
+  # Two things this does not do by itself:
+  #   - The BIOS must allow it (Power On By PCI-E / Wake on LAN) with ErP/EuP
+  #     disabled, or the card loses standby power once the machine is off.
+  #   - It does not arm an interface that is already up, because udev only
+  #     applies .link files on device add. Reboot, or re-trigger by hand:
+  #       sudo udevadm trigger --action=add /sys/class/net/enp7s0
+  #     Check with `ethtool enp7s0 | grep Wake-on`: "g" is armed, "d" is not.
+  networking.interfaces.enp7s0.wakeOnLan.enable = true;
+
   # Set your time zone.
   time.timeZone = "Europe/Amsterdam";
 
