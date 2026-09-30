@@ -402,6 +402,33 @@ in
   services.displayManager.gdm.enable = true;
   services.desktopManager.gnome.enable = true;
 
+  # Log gustav straight into GNOME at boot, with no greeter.
+  #
+  # This exists for the Wake-on-LAN -> RustDesk path: the rustdesk system
+  # service below only spawns its `--server` child *inside a logged-in seat0
+  # session*, so a machine woken remotely and parked at the GDM greeter has
+  # nothing serving connections. Autologin is what turns "the box is on" into
+  # "the box is reachable".
+  #
+  # Renders AutomaticLoginEnable/AutomaticLogin into GDM's custom.conf. Two
+  # consequences worth knowing:
+  #   - Physical access to this machine is now equivalent to being logged in as
+  #     gustav; the disk is not encrypted, so this mostly formalises what an
+  #     attacker at the case already had.
+  #   - "Log Out" lands you straight back in a fresh session rather than at the
+  #     greeter, which is what autologin means. To get a greeter that gives you
+  #     a few seconds to intervene before logging in anyway, swap this for
+  #     `services.displayManager.gdm.autoLogin.delay = 5;` (TimedLogin).
+  #
+  # The login keyring is *not* unlocked by this, because PAM never sees a
+  # password. RustDesk keeps its permanent password in RustDesk2.toml rather
+  # than the keyring so it is unaffected, but anything that does use the keyring
+  # (browser passwords, GNOME Online Accounts) will prompt once per boot.
+  services.displayManager.autoLogin = {
+    enable = true;
+    user = "gustav";
+  };
+
   # Flatpak + Flathub. Needed for Sober (org.vinegarhq.Sober), the only
   # working way to run the Roblox player on Linux (runs the Android client;
   # the old Wine route is blocked by Roblox's Hyperion anti-cheat).
