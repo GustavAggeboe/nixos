@@ -354,6 +354,14 @@ in
   # Configure network connections interactively with nmcli or nmtui.
   networking.networkmanager.enable = true;
 
+  # Resolve .local hostnames (mDNS/Bonjour) — e.g. `ssh aggepi.local`.
+  # avahi-daemon already ran (GNOME pulls it in) but glibc never consulted it;
+  # nssmdns4 is what inserts mdns4_minimal into /etc/nsswitch.conf.
+  services.avahi = {
+    enable = true;
+    nssmdns4 = true;
+  };
+
   # Set your time zone.
   time.timeZone = "Europe/Amsterdam";
 
