@@ -54,6 +54,25 @@ let
     mkdir -p "$dir/$game" && mv -f "$file" "$dir/$game/"
   '';
 
+  # Snipping-Tool-style "screenshot, then draw on it". GNOME's own screenshot UI
+  # (Print) already copies the capture to the clipboard; this opens that image
+  # in Satty for annotation, and Ctrl+C / Enter puts the annotated version back
+  # on the clipboard and closes Satty. Bound to Super+Print below. Satty can't
+  # capture the screen itself on GNOME (no wlr-screencopy), hence the clipboard.
+  annotateScreenshot = pkgs.writeShellScript "annotate-screenshot" ''
+    if ! ${pkgs.wl-clipboard}/bin/wl-paste -l | grep -qx image/png; then
+      ${pkgs.libnotify}/bin/notify-send -i accessories-screenshot \
+        "Nothing to annotate" "Take a screenshot with Print Screen first."
+      exit 0
+    fi
+    ${pkgs.wl-clipboard}/bin/wl-paste -t image/png \
+      | ${pkgs.satty}/bin/satty --filename - \
+          --copy-command ${pkgs.wl-clipboard}/bin/wl-copy \
+          --early-exit copy \
+          --actions-on-enter save-to-clipboard,exit \
+          --initial-tool brush
+  '';
+
   # The replay buffer records the mic from the "gsr_mic_boost" virtual source
   # (a gain-boosted filter-chain fed by Easy Effects' processed "easyeffects_source"
   # — created by the gsr-mic-boost.service filter-chain process below). That
@@ -461,7 +480,14 @@ in
         "org/gnome/settings-daemon/plugins/media-keys" = {
           custom-keybindings = [
             "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/gsr-save/"
+            "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/annotate-screenshot/"
           ];
+        };
+        # Super+Print → annotate the screenshot currently on the clipboard.
+        "org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/annotate-screenshot" = {
+          name = "Annotate screenshot";
+          command = "${annotateScreenshot}";
+          binding = "<Super>Print";
         };
         "org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/gsr-save" = {
           name = "Save replay (last 5 min)";
@@ -474,11 +500,14 @@ in
 
   environment.systemPackages = with pkgs; [
     helix
+    satty         # Screenshot annotation; see annotateScreenshot (Super+Print)
+    wl-clipboard  # wl-copy / wl-paste
     vim
     git
     gh
     alsa-scarlett-gui
     easyeffects  # Audio effects (input noise suppression via RNNoise; tune in GUI)
+    audacity
 
     # Tidal desktop client. Tidal's own desktop app isn't packaged for Linux
     # (`pkgs.tidal` is the macOS build, aarch64-darwin only), so this is the
@@ -520,7 +549,21 @@ in
     google-chrome  # Google Chrome (unfree; allowUnfree is set in modules/core/default-nixos.nix)
     rustdesk-wayland  # Remote desktop client (pipewire gst plugin added for Wayland)
     jetbrains.idea  # IntelliJ IDEA Ultimate (swap to .idea-community for the free edition)
-    nodejs  # provides node, npm and npx
+    # Node 22 — provides node, npm and npx. Pinned to the major version rather
+    # than the unversioned `nodejs` (which tracks latest, currently 24) because
+    # spirelight-portal's web app declares engines node ">=20.19.4 <23" and npm
+    # ">=10.5.0 <11" (apps/web/package.json); 24 ships npm 11 and fails both.
+    nodejs_22
+
+    # Java 21 (JDK) — build/run toolchain for spirelight-portal's Spring Boot
+    # API. Its Gradle build pins the toolchain to language version 21
+    # (apps/api/build.gradle.kts), and that lookup is an exact major-version
+    # match: a newer JDK does not satisfy it, Gradle fails configuration with
+    # "Cannot find a Java installation ... matching: {languageVersion=21}".
+    # No toolchain download repositories are configured (and auto-provisioning
+    # would fetch a non-Nix binary anyway), so the JDK has to come from here;
+    # Gradle then discovers it by auto-detecting the `java` on PATH.
+    jdk21
     gnome-extension-manager  # "Extension Manager" — browse/install/toggle GNOME extensions
 
     # Screen recording / "instant replay" (AMD ReLive-style last-N-minutes
@@ -564,6 +607,39 @@ in
     # the system path, iptables is, via networking.firewall).
     eddie
   ];
+
+  # Point Gradle's toolchain detection at the JDK 21 installed above. Gradle
+  # never scans PATH for JDKs: on Linux it looks at the JVM running Gradle,
+  # JAVA_HOME/JDK_* variables, /usr/lib/jvm-style directories, SDKMAN, asdf,
+  # jabba, ~/.jdks and Maven toolchains — and on NixOS every one of those is
+  # absent. So spirelight-portal's `languageVersion = 21` toolchain resolved
+  # only when the JVM that happened to launch Gradle was the PATH JDK, which
+  # broke whenever IntelliJ started the daemon on its bundled JetBrains
+  # Runtime 25 (a daemon plain `npm run dev` then reused).
+  #
+  # sessionVariables rather than variables: this goes into the PAM session
+  # environment, so GUI apps launched from the GNOME session (IntelliJ) inherit
+  # it too. environment.variables is only sourced by shell init, which is
+  # exactly the case that already worked.
+  #
+  # The indirection through /run/current-system is deliberate — a bare
+  # /nix/store/...-openjdk-21.../lib/openjdk path would go stale on the next
+  # nixpkgs bump.
+  environment.sessionVariables.JAVA_HOME = "/run/current-system/sw/lib/openjdk";
+
+  # A stable, browsable JDK home for IntelliJ's "Select Home Directory for JDK"
+  # chooser. The JDK is already reachable at /run/current-system/sw/lib/openjdk,
+  # but that is not a place anyone thinks to look — the chooser opens on
+  # .../sw/bin, and `bin` is not a JDK home, so the IDE appears to find nothing.
+  # /etc/jdks/<version> is the conventional spot, and being version-keyed it
+  # takes a second entry (17, 25, ...) without either one moving.
+  #
+  # Gradle does NOT scan /etc/jdks — its Linux supplier only looks in
+  # /usr/lib/jvm, /usr/lib64/jvm and /usr/local/java. Gradle finds this JDK via
+  # JAVA_HOME above instead. If a second JDK version ever lands here, point
+  # Gradle at both with org.gradle.java.installations.paths in
+  # ~/.gradle/gradle.properties and retire the single JAVA_HOME.
+  environment.etc."jdks/21".source = pkgs.jdk21.home;
 
   # Install gpu-screen-recorder via its NixOS module rather than just dropping
   # the package in systemPackages: the module additionally creates a setcap
@@ -808,6 +884,7 @@ in
     extraGroups = [
       "wheel"
       "nix"
+      "docker"
     ];
     packages = with pkgs; [ ];
   };

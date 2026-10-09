@@ -99,6 +99,7 @@
             aggepc = {
               modules = [
                 ./modules/mouse.nix
+                ./modules/office.nix
 
                 # Claude desktop app. Cowork's sandbox VM needs /dev/kvm,
                 # hence kvmUsers.
