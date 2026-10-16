@@ -23,6 +23,7 @@ let
     green = "1;32";
     orange = "1;33";
     cyan = "1;36";
+    white = "1;37";
   };
 
   # Unicode escape sequences for symbols for proper character width when printed.
@@ -48,7 +49,7 @@ let
       resetColors = ''\[\x1b[0m'';
     in
     # Expand escape and unicode characters and by using a $'' string.
-    "$'${mainColor}\\u${hostname} ${devShell}\\w ${symbol} ${resetColors}'";
+    "$'${colors.white}''(\\t) '$'${mainColor}\\u${hostname} ${devShell}\\w ${symbol} ${resetColors}'";
 
   promptInit = ''
     # Set red prompt only for root.
