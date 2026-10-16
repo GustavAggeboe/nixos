@@ -1174,6 +1174,83 @@ in
     };
   };
 
+  # Layer 4: terminal commands come last.
+  # 2026-10-16: two `sed` runs over large binaries, started from Claude Code,
+  # grew to ~10 GB each. Layer 1 caught them but caught everyone else too.
+  # All apps share app.slice's 20G MemoryHigh, so the whole slice was
+  # throttled and swapped as one. GNOME survived, but Console, Files and every
+  # new window starved, and the desktop was unusable. The same would happen
+  # with a command typed into a terminal: the shell lives in its emulator's
+  # cgroup, inside app.slice.
+  #
+  # The rule: a command run from any terminal, by me or by Claude, gets the
+  # lowest priority on the box for CPU and memory alike. If something has to
+  # give, it is the command, never the desktop or the apps.
+  #
+  # Memory can't be "idle" the way CPU can: a page in use stays in use. The
+  # nearest equivalents are used instead:
+  # - a 12G ceiling, so a runaway command hits its own cgroup OOM before it
+  #   can squeeze anything else. At that point the kernel kills the largest
+  #   process in the cgroup, which is the command, not the shell or app.
+  # - no MemoryHigh. It would leave the command crawling in reclaim forever
+  #   instead of failing fast.
+  # - MemorySwapMax, so commands can't eat the swap the session needs.
+  # - oom_score_adj=1000 on every interactive shell and so on everything it
+  #   starts, so a system-wide OOM (terminal.slice and app.slice can together
+  #   exceed RAM) takes terminal commands first. Raising your own score needs
+  #   no privileges.
+  # io is not delegated to the user manager (only cpu, memory and pids), and
+  # the disks run the `none` scheduler, so there is no IO equivalent.
+
+  # 4a: every interactive shell moves itself, and so everything it runs,
+  # into its own scope in terminal.slice. That covers Console, Alacritty,
+  # zellij panes and Claude Desktop's terminal panel. Nested shells (nix
+  # develop, bash in bash) see they are already there and stay put. ssh
+  # logins live in session-N.scope, outside the user manager's reach, so
+  # they only get the OOM score.
+  programs.bash.interactiveShellInit = ''
+    __cg=; read -r __cg < /proc/self/cgroup
+    case $__cg in
+      */user@"$UID".service/terminal.slice/*) ;;
+      */user@"$UID".service/*)
+        busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+          org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' \
+          "terminal-$$.scope" fail 2 PIDs au 1 $$ Slice s terminal.slice 0 >/dev/null 2>&1 ;;
+    esac
+    unset __cg
+    echo 1000 2>/dev/null > /proc/$$/oom_score_adj
+  '';
+
+  systemd.user.slices.terminal = {
+    description = "Commands run from terminals (lowest priority)";
+    sliceConfig = {
+      MemoryAccounting = true;
+      MemoryMax = "12G";
+      MemorySwapMax = "1G";
+      CPUWeight = "idle";
+    };
+  };
+
+  # 4b: Claude Code's own commands don't go through an interactive shell. It
+  # runs `bash -c` from the desktop app, so they stay in the app's
+  # app-com.anthropic.Claude-<pid>.scope: the main and node processes, the
+  # claude CLI and everything it spawns. The chat window's renderers live in
+  # a separate app-gnome-com.anthropic.Claude-*.scope. This drop-in gives
+  # that scope the same memory terms, matched by name prefix. Its
+  # CPUWeight=idle half already lives in
+  # ~/.config/systemd/user/app-com.anthropic.Claude-.scope.d/, and both files
+  # apply. The app itself is ~0.7 GB, so a runaway command is always the
+  # largest process and the one killed.
+  systemd.user.units."app-com.anthropic.Claude-.scope" = {
+    overrideStrategy = "asDropin";
+    text = ''
+      [Scope]
+      MemoryAccounting=yes
+      MemoryMax=12G
+      MemorySwapMax=1G
+    '';
+  };
+
   # For more information, see `man configuration.nix` or https://nixos.org/manual/nixos/stable/options#opt-system.stateVersion .
   system.stateVersion = "26.05"; # Did you read the comment?
 
