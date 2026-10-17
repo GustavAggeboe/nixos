@@ -23,7 +23,7 @@
     "sd_mod"
   ];
   boot.initrd.kernelModules = [ ];
-  boot.kernelModules = [ "kvm-intel" ];
+  boot.kernelModules = [ "kvm-intel" "ntsync" ];
   boot.extraModulePackages = [ ];
   boot.kernelParams = [ "pcie_aspm=off" ];
 
@@ -73,17 +73,12 @@
   boot.supportedFilesystems = [ "ntfs" ];
   fileSystems."/run/media/thedb/stor dreng" = {
     device = "/dev/disk/by-uuid/94686AF9686AD98E";
-    fsType = "ntfs3";
+    fsType = "ntfs";
+    noCheck = true;
     options = [
       "rw"
-      # "nosuid"
-      # "nodev"
-      # "nofail"
-      # "relatime"
-      # "uid=1000"
-      # "gid=100"
-      # "iocharset=utf8"
-      # "uhelper=udisks2"
+      "discard"
+      "uid=1000"
       "x-gvfs-hide" # Hide unmount button, don't want that happening.
     ];
     neededForBoot = false;

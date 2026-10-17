@@ -11,13 +11,13 @@ let
 
   shellAliases = {
     # Update.
-    ud = "sudo $SHELL -c 'cd /etc/nixos; git fetch; git rebase --autostash'";
+    ud = "sudo -k $SHELL -c 'cd /etc/nixos; git fetch; git rebase --autostash'";
 
     # Rebuild.
-    rb = "sudo nixos-rebuild switch --flake /etc/nixos";
+    rb = "sudo -k nixos-rebuild switch --flake /etc/nixos";
 
     # 'Edit flake'. Go to /etc/nixos as root.
-    ef = "$SHELL -c 'cd /etc/nixos; sudo --preserve-env --shell'";
+    ef = "$SHELL -c 'cd /etc/nixos; sudo -k --preserve-env --shell'";
 
     # Nix commands.
     nd = "nix develop";
@@ -32,36 +32,31 @@ let
         return
       fi
 
-      declare -a nsCommand=()
-
       if [[ ''${name:0:4} == "ns: " ]]; then
         nsName="''$name, "
       else
-        first=1
         nsName="ns: "
       fi
 
-      function add-arg-to-commands {
-        # Check if package is already in use.
-        if [[ "$name" =~ " "''${1}(,|$) ]]; then
-          return
-        fi
+      declare -a nsCommand=()
 
+      for arg_number in $(seq 1 $#); do
+        arg=''${@:arg_number:1}
+
+        # Don't add package is already in use.
+        if [[ "$name" =~ " "$arg(,|$) ]]; then
+          continue
         # Don't append arg name to 'nixpkgs#', if it a flag.
-        if [[ ''${1:0:1} == "-" ]]; then
-          nsCommand+=("$1")
-        # Don't append arg name to 'nixpkgs#', if it has a hashtag.
-        elif [[ "$1" =~ "#" ]]; then
-          nsCommand+=("$1")
-          nsName+="$([[ ! first ]] && printf ', ')$1"
+        elif [[ ''${arg:0:1} == "-" ]]; then
+          nsCommand+=("$arg")
+          continue
+        # Don't append arg name to 'nixpkgs#', if it has a pound sign.
+        elif [[ "1" =~ "#" ]]; then
+          nsCommand+=("$arg")
         else
-          nsCommand+=("nixpkgs#$1")
-          nsName+="$([[ ! first ]] && printf ', ')$1"
+          nsCommand+=("nixpkgs#$arg")
         fi
-      }
-
-      for arg in "''${@:1:$#}"; do
-        add-arg-to-commands "$arg"
+        nsName+="$arg$([[ $arg_number != $# ]] && printf ', ')"
       done
       
       if [[ ''${#nsCommand[@]} == 0 ]] then
@@ -82,7 +77,7 @@ let
     }
   '';
 
-  nixPath = "/etc/nixPath";
+  nixpkgs-path = "/etc/nixpkgs";
 in
 {
   options = {
@@ -132,9 +127,9 @@ in
     };
 
     # Set nix channel to follow system flake nixpkgs input.
-    nix.nixPath = [ "nixpkgs=${nixPath}" ];
+    nix.settings.nix-path = [ "nixpkgs=${nixpkgs-path}" ];
     systemd.tmpfiles.rules = [
-      "L+ ${nixPath} - - - - ${pkgs.path}"
+      "L+ ${nixpkgs-path} - - - - ${pkgs.path}"
     ];
 
     nixpkgs.config.allowUnfree = true;
@@ -145,6 +140,8 @@ in
         nix-search-cli
         nix-index
       ];
+    }
+    // lib.optionalAttrs (inputs ? nixpkgs) {
       variables = {
         NIXPKGS_REV = "${inputs.nixpkgs.rev}";
       };

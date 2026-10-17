@@ -86,6 +86,7 @@
   environment.systemPackages = [
     pkgs.sbctl
     pkgs.mullvad-vpn
+    pkgs.discord
     # pkgs.futhark
   ];
 

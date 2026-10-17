@@ -65,6 +65,10 @@ let
     	[[ $cwd != "$PWD" ]] && [[ -d "$cwd" ]] && builtin cd -- "$cwd"
     	command rm -f -- "$tmp"
     }
+
+    function cdgit {
+      cd ~/Documents/git/"$1"
+    }
   '';
 
   # Quick shortcuts.
@@ -72,7 +76,6 @@ let
     zj = "zellij";
     lg = "lazygit";
     ff = "fastfetch";
-    cdgit = "cd ~/Documents/git";
     cdtemp = "cd $(mktemp -d)";
     pipes = "pipes.sh -t 0 -c 1 -c 2 -c 3 -c 4 -c 5 -c 6 -c";
   };

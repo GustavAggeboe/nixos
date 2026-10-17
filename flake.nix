@@ -70,69 +70,63 @@
           formatter = pkgs.nixfmt-tree;
         };
 
-      flake = {
-        nixosConfigurations =
-          let
-            mapHosts = mapAttrs (
-              name: host:
-              nixpkgs.lib.nixosSystem (
-                host
-                // {
-                  specialArgs = host.specialArgs or { } // {
-                    inherit
-                      inputs
-                      patches
-                      self
-                      swaglib
-                      ;
-                  };
+      flake.nixosConfigurations =
+        let
+          makeHosts = mapAttrs (
+            name: host:
+            nixpkgs.lib.nixosSystem (
+              host
+              // {
+                modules = host.modules or [ ] ++ [
+                  ./hosts/${name}/configuration.nix
+                  (importDirectory { dir = ./modules/core; })
+                  {
+                    config._module.args = {
+                      inherit
+                        inputs
+                        patches
+                        self
+                        swaglib
+                        ;
+                    };
+                  }
+                ];
+              }
+            )
+          );
+        in
+        makeHosts {
+          aggepc.modules = [
+            ./modules/mouse.nix
+            inputs.maccel.nixosModules.default
+            ./modules/office.nix
 
-                  modules = host.modules or [ ] ++ [
-                    ./hosts/${name}/configuration.nix
-                    (importDirectory { dir = ./modules/core; })
-                  ];
-                }
-              )
-            );
-          in
-          mapHosts {
-            aggepc = {
-              modules = [
-                ./modules/mouse.nix
-                ./modules/office.nix
-
-                # Claude desktop app. Cowork's sandbox VM needs /dev/kvm,
-                # hence kvmUsers.
-                inputs.claude-desktop.nixosModules.default
-                {
-                  programs.claude-desktop = {
-                    enable = true;
-                    cowork.kvmUsers = [ "gustav" ];
-                  };
-                }
-              ];
-            };
-            gamebeast = {
-              modules = [
-                ./modules/dev.nix
-                ./modules/gaming.nix
-                ./modules/gui.nix
-                ./modules/music.nix
-                ./modules/office.nix
-                hytale-flake.nixosModules.hytale-launcher
-              ];
-            };
-            duster = {
-              modules = [
-                ./modules/dev.nix
-                ./modules/gui.nix
-                lanzaboote.nixosModules.lanzaboote
-              ];
-            };
-            files = { };
-            builder = { };
-          };
-      };
+            # Claude desktop app. Cowork's sandbox VM needs /dev/kvm,
+            # hence kvmUsers.
+            inputs.claude-desktop.nixosModules.default
+            {
+              programs.claude-desktop = {
+                enable = true;
+                cowork.kvmUsers = [ "gustav" ];
+              };
+            }
+          ];
+          gamebeast.modules = [
+            ./modules/dev.nix
+            ./modules/gaming.nix
+            ./modules/gui.nix
+            ./modules/music.nix
+            ./modules/office.nix
+            hytale-flake.nixosModules.hytale-launcher
+          ];
+          duster.modules = [
+            ./modules/dev.nix
+            ./modules/gui.nix
+            lanzaboote.nixosModules.lanzaboote
+          ];
+          files = { };
+          builder = { };
+        };
     in
     foldl' (
       acc: system:

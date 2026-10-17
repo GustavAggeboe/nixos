@@ -32,6 +32,16 @@ let
 
   helix =
     let
+      package =
+        let
+          nixpkgs-fix-helix-grammars = pkgs.fetchgit {
+            url = "https://github.com/aciceri/nixpkgs";
+            rev = "5f8720ba2e735b23dffd2b423b0372f96741714c";
+            hash = "sha256-mEzPdEW6sw5qge1GjHHxB/gEQhKI0G0ORL2LnyScZ2Y=";
+          };
+        in
+        pkgs.callPackage "${nixpkgs-fix-helix-grammars}/pkgs/by-name/he/helix/package.nix" { };
+
       configFile = pkgs.stdenvNoCC.mkDerivation {
         name = "helix-config.toml";
         src = ../configs/helix/config.toml;
@@ -45,8 +55,8 @@ let
       };
     in
     symlinkWrap {
-      package = pkgs.helix.override (old: {
-        helix-unwrapped = old.helix-unwrapped.overrideAttrs (safeOverride {
+      package = package.override (old: {
+        helix-unwrapped = pkgs.helix-unwrapped.overrideAttrs (safeOverride {
           patches = [ patches.helix-upppercase-commands ];
         });
       });

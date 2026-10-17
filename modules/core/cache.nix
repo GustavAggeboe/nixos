@@ -81,7 +81,10 @@ in
       '';
 
       systemd.services.user-nixos-cache-update = {
-        after = [ "network-online.target" ];
+        after = [
+          "network.target"
+          "network-online.target"
+        ];
         wants = [ "network-online.target" ];
 
         path = [
@@ -123,10 +126,9 @@ in
       systemd.timers.user-nixos-cache-update = {
         wantedBy = [ "timers.target" ];
         timerConfig = {
-          OnUnitActiveSec = "1h";
           RandomizedDelaySec = "180";
           Persistent = true;
-          OnCalendar = "daily";
+          OnCalendar = "hourly";
         };
       };
     })
@@ -155,6 +157,7 @@ in
               coreutils
               gawk
               git
+              gh
               nix
               nixos-rebuild
               systemd
@@ -233,10 +236,16 @@ in
                 echo
               fi
 
+              CACHED_HOSTS_DIR=/nix/var/nix/gcroots/cached-hosts
+
+              mkdir -p "$CACHED_HOSTS_DIR"
+              rm -rf "''${CACHED_HOSTS_DIR:?}/*"
+
               for system in "''${buildSystems[@]}"; do
                 # Skip building system if it is not using the cache.
                 print-with-underline "Building '$system'" --time
-                nixos-rebuild build --flake .#"$system" --no-link -j 1
+                nixos-rebuild build --flake .#"$system" -j 1
+                mv ./result "''${CACHED_HOSTS_DIR:?}/$system"
                 echo
               done
 
@@ -259,10 +268,11 @@ in
           };
         in
         {
-          after = [ "network-online.target" ];
+          after = [
+            "network.target"
+            "network-online.target"
+          ];
           wants = [ "network-online.target" ];
-
-          path = [ pkgs.gh ];
 
           environment = {
             NO_COLOR = "1";

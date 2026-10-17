@@ -106,7 +106,7 @@
   system.replaceDependencies.replacements =
     let
       native-mutter = native.mutter.override {
-        inherit (native) gtk4 gnome-desktop;
+        inherit (native) cairo gtk4 gnome-desktop;
       };
     in
     [
@@ -137,10 +137,13 @@
         (
           builtins.attrNames {
             inherit (pkgs)
+              cairo
               gnome-desktop
               libdrm
               libgbm
+              pixman
               vulkan-loader
+              xwayland
               ;
           }
         );
@@ -182,13 +185,13 @@
   };
 
   # Enable the X11 windowing system.
-  hardware.nvidia = {
-    open = true;
-    modesetting.enable = true;
-  };
   services.xserver = {
     enable = true;
     videoDrivers = [ "nvidia" ];
+  };
+  hardware.nvidia = {
+    open = true;
+    modesetting.enable = true;
   };
 
   services.libinput.enable = true;
@@ -217,7 +220,6 @@
     libvirt
     freetype
     native.ripgrep
-    # rocmPackages.rocm-smi # AMD GPU Monitoring
   ];
 
   services.udev.enable = true;
@@ -371,6 +373,7 @@
   boot.kernelParams = [
     "mem_sleep_default=deep"
     "pcie_port_pm=off"
+    "nmi_watchdog=0" # For better 'perf' statistics, for 'futhark' benchmarking.
   ];
 
   # WiFi card fixes.

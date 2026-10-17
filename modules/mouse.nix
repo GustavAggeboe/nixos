@@ -12,15 +12,15 @@
 # TUI (`maccel tui`, shows a sensitivity graph); CLI/TUI changes are temporary,
 # so once a curve feels right, copy the values into `parameters` below and
 # `nixos-rebuild switch` to persist them.
+#
+# Needs inputs.maccel.nixosModules.default, imported alongside this module in
+# flake.nix (module args can't be used in `imports`).
 {
-  inputs,
   config,
   lib,
   ...
 }:
 {
-  imports = [ inputs.maccel.nixosModules.default ];
-
   hardware.maccel = {
     enable = true;
     enableCli = true; # installs `maccel` (CLI + `maccel tui`) for live tuning
